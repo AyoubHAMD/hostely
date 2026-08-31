@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/logo.png" width="110" alt="hostely logo" />
+
 # hostely
 
 **One Apple-native CLI for your Mac's whole job: run containers, serve LLMs, and know exactly what's left in unified memory.**
