@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 300" font-family="-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
+<style>
+  .bg{fill:#fcfcfb} .val{fill:#0b0b0b;font-size:11.5px;font-weight:600}
+  .tick{fill:#52514e;font-size:11px} .ptitle{fill:#52514e;font-size:12.5px;font-weight:600}
+  .glabel{fill:#52514e;font-size:11px}
+  .gridline{stroke:#e7e6e2;stroke-width:1} .axisline{stroke:#c8c7c1;stroke-width:1}
+  .b0{fill:#2a78d6} .b1{fill:#eb6834} .lg0{fill:#2a78d6} .lg1{fill:#eb6834}
+  @media (prefers-color-scheme: dark) {
+    .bg{fill:#1a1a19} .val{fill:#ffffff} .tick,.ptitle,.glabel{fill:#c3c2b7}
+    .gridline{stroke:#34342f} .axisline{stroke:#55544c}
+    .b0,.lg0{fill:#3987e5} .b1,.lg1{fill:#d95926}
+  }
+</style>
+<rect class="bg" width="780" height="300"/>
+<rect x="70" y="12" width="12" height="12" rx="3" class="lg0"/>
+<text x="87" y="22" class="glabel" style="font-weight:600">hostely</text>
+<rect x="162" y="12" width="12" height="12" rx="3" class="lg1"/>
+<text x="179" y="22" class="glabel" style="font-weight:600">Ollama</text>
+<text x="180" y="34" text-anchor="middle" class="ptitle">Generation (tok/s)</text>
+<line x1="70" y1="250.0" x2="290" y2="250.0" class="gridline"/>
+<text x="62" y="253.5" text-anchor="end" class="tick">0</text>
+<line x1="70" y1="178.6" x2="290" y2="178.6" class="gridline"/>
+<text x="62" y="182.1" text-anchor="end" class="tick">50</text>
+<line x1="70" y1="107.1" x2="290" y2="107.1" class="gridline"/>
+<text x="62" y="110.6" text-anchor="end" class="tick">100</text>
+<line x1="70" y1="250" x2="290" y2="250" class="axisline"/>
+<path fill="none" class="b0" d="M145,250 V88.1 Q145,84.1 149,84.1 H175 Q179,84.1 179,88.1 V250 Z"/>
+<text x="162" y="78.1" text-anchor="middle" class="val">116</text>
+<path fill="none" class="b1" d="M181,250 V78.4 Q181,74.4 185,74.4 H211 Q215,74.4 215,78.4 V250 Z"/>
+<text x="198" y="68.4" text-anchor="middle" class="val">123</text>
+<text x="180" y="284" text-anchor="middle" class="glabel">count 1 to 300</text>
+<text x="550" y="34" text-anchor="middle" class="ptitle">Prefill rate (tok/s)</text>
+<line x1="370" y1="250.0" x2="730" y2="250.0" class="gridline"/>
+<text x="362" y="253.5" text-anchor="end" class="tick">0</text>
+<line x1="370" y1="183.3" x2="730" y2="183.3" class="gridline"/>
+<text x="362" y="186.8" text-anchor="end" class="tick">600</text>
+<line x1="370" y1="116.7" x2="730" y2="116.7" class="gridline"/>
+<text x="362" y="120.2" text-anchor="end" class="tick">1200</text>
+<line x1="370" y1="50.0" x2="730" y2="50.0" class="gridline"/>
+<text x="362" y="53.5" text-anchor="end" class="tick">1800</text>
+<line x1="370" y1="250" x2="730" y2="250" class="axisline"/>
+<path fill="none" class="b0" d="M395.0,250 V108.1 Q395.0,104.1 399.0,104.1 H425.0 Q429.0,104.1 429.0,108.1 V250 Z"/>
+<text x="412" y="98.1" text-anchor="middle" class="val">1313</text>
+<path fill="none" class="b1" d="M431.0,250 V98.7 Q431.0,94.7 435.0,94.7 H461.0 Q465.0,94.7 465.0,98.7 V250 Z"/>
+<text x="448" y="88.7" text-anchor="middle" class="val">1398</text>
+<text x="430" y="284" text-anchor="middle" class="glabel">@ 290 tok</text>
+<path fill="none" class="b0" d="M515.0,250 V102.2 Q515.0,98.2 519.0,98.2 H545.0 Q549.0,98.2 549.0,102.2 V250 Z"/>
+<text x="532" y="92.2" text-anchor="middle" class="val">1366</text>
+<path fill="none" class="b1" d="M551.0,250 V65.0 Q551.0,61.0 555.0,61.0 H581.0 Q585.0,61.0 585.0,65.0 V250 Z"/>
+<text x="568" y="55.0" text-anchor="middle" class="val">1701</text>
+<text x="550" y="284" text-anchor="middle" class="glabel">@ 1,186 tok</text>
+<path fill="none" class="b0" d="M635.0,250 V108.2 Q635.0,104.2 639.0,104.2 H665.0 Q669.0,104.2 669.0,108.2 V250 Z"/>
+<text x="652" y="98.2" text-anchor="middle" class="val">1312</text>
+<path fill="none" class="b1" d="M671.0,250 V97.0 Q671.0,93.0 675.0,93.0 H701.0 Q705.0,93.0 705.0,97.0 V250 Z"/>
+<text x="688" y="87.0" text-anchor="middle" class="val">1413</text>
+<text x="670" y="284" text-anchor="middle" class="glabel">@ 2,370 tok</text>
+</svg>

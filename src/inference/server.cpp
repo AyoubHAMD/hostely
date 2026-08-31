@@ -195,9 +195,15 @@ struct Server::Impl {
     // tokens form a prefix of this prompt (KV reuse detected from the prompt
     // itself); if none matches, the stateless single-shot path runs on
     // sequence 0.
+    struct CompletionStats {
+        int prompt_tokens     = 0;
+        int completion_tokens = 0;
+    };
+
     std::string complete(const std::string& prompt, int max_tokens,
                          const std::string& session_id = {},
-                         bool allow_session_fallback = true) {
+                         bool allow_session_fallback = true,
+                         CompletionStats* stats = nullptr) {
         std::lock_guard<std::mutex> lock(infer_mu);
 
         llama_memory_t mem = llama_get_memory(ctx);
@@ -219,6 +225,7 @@ struct Server::Impl {
         }
         if (n_prompt <= 0) return {};
         prompt_tokens.resize(n_prompt);
+        if (stats) stats->prompt_tokens = n_prompt;
 
         // ---- resolve the session ------------------------------------------
         Session* sess = nullptr;
@@ -309,8 +316,12 @@ struct Server::Impl {
         // llama_batch_get_one hardcodes seq 0, so sessions need a manual
         // batch with an explicit seq id and absolute positions.
         const std::size_t n_feed = prompt_tokens.size() - n_past;
-        llama_batch batch = llama_batch_init(
-            std::max<std::size_t>(n_feed, 1), /*embd*/ 0, /*n_seq_max*/ 1);
+        // Prefill must be chunked to n_batch — a single batch larger than
+        // n_batch trips GGML_ASSERT(n_tokens_all <= cparams.n_batch).
+        const std::size_t n_chunk = std::min<std::size_t>(
+            std::max<std::size_t>(n_feed, 1),
+            static_cast<std::size_t>(llama_n_batch(ctx)));
+        llama_batch batch = llama_batch_init(n_chunk, /*embd*/ 0, /*n_seq_max*/ 1);
 
         auto fill_batch = [&](llama_token tok, llama_pos pos, bool want_logits) {
             batch.token[0]     = tok;
@@ -322,17 +333,18 @@ struct Server::Impl {
         };
 
         bool prefill_ok = true;
-        if (n_feed > 0) {
-            // One batch for the whole delta — decoding token-by-token was
+        for (std::size_t start = 0; prefill_ok && start < n_feed; start += n_chunk) {
+            // One batch per n_batch-sized chunk — decoding token-by-token was
             // ~10x slower and bought nothing.
-            for (std::size_t i = 0; i < n_feed; ++i) {
-                batch.token[i]        = prompt_tokens[n_past + i];
-                batch.pos[i]          = static_cast<llama_pos>(n_past + i);
+            const std::size_t len = std::min(n_chunk, n_feed - start);
+            for (std::size_t i = 0; i < len; ++i) {
+                batch.token[i]        = prompt_tokens[n_past + start + i];
+                batch.pos[i]          = static_cast<llama_pos>(n_past + start + i);
                 batch.n_seq_id[i]     = 1;
                 batch.seq_id[i][0]    = seq;
-                batch.logits[i]       = (i + 1 == n_feed);
+                batch.logits[i]       = (start + i + 1 == n_feed);
             }
-            batch.n_tokens = static_cast<int32_t>(n_feed);
+            batch.n_tokens = static_cast<int32_t>(len);
             if (llama_decode(ctx, batch) != 0) {
                 log::error("llama_decode (prefill) failed");
                 prefill_ok = false;
@@ -397,6 +409,7 @@ struct Server::Impl {
             sess->tokens.insert(sess->tokens.end(),
                                 generated.begin(), generated.end());
         }
+        if (stats) stats->completion_tokens = static_cast<int>(generated.size());
         return out;
     }
 
@@ -434,9 +447,21 @@ struct Server::Impl {
         }
 
         // /v1/completions is always stateless per the OpenAI contract.
+        CompletionStats stats;
         std::string text = complete(prompt, max_tokens,
                                     /*session_id*/ {},
-                                    /*allow_session_fallback*/ false);
+                                    /*allow_session_fallback*/ false, &stats);
+        if (text.empty() && stats.prompt_tokens > 0) {
+            // complete() returns "" only on decode failure (e.g. KV pool
+            // exhausted by live sessions) — that's a server error, not an
+            // empty completion, and must not be masked by a 200.
+            res.status = 503;
+            res.set_content(json{{"error",
+                "inference failed; the KV pool may be exhausted — restart "
+                "the server or retry with a shorter prompt"}}.dump(),
+                "application/json");
+            return;
+        }
 
         json resp = {
             {"id",       "cmpl-" + std::to_string(
@@ -449,7 +474,9 @@ struct Server::Impl {
                 {"index",         0},
                 {"finish_reason", "stop"},
             }})},
-            {"usage", {{"prompt_tokens", 0}, {"completion_tokens", 0}, {"total_tokens", 0}}},
+            {"usage", {{"prompt_tokens", stats.prompt_tokens},
+                       {"completion_tokens", stats.completion_tokens},
+                       {"total_tokens", stats.prompt_tokens + stats.completion_tokens}}},
         };
         res.set_content(resp.dump(), "application/json");
     }
@@ -478,7 +505,17 @@ struct Server::Impl {
         // existing sessions and otherwise runs stateless.
         std::string session_id = req.get_header_value("X-Session-Id");
 
-        std::string text = complete(prompt, max_tokens, session_id);
+        CompletionStats stats;
+        std::string text = complete(prompt, max_tokens, session_id,
+                                    /*allow_session_fallback*/ true, &stats);
+        if (text.empty() && stats.prompt_tokens > 0) {
+            res.status = 503;
+            res.set_content(json{{"error",
+                "inference failed; the KV pool may be exhausted — restart "
+                "the server or retry with a shorter prompt"}}.dump(),
+                "application/json");
+            return;
+        }
 
         json resp = {
             {"id",       "chatcmpl-" + std::to_string(
@@ -491,7 +528,9 @@ struct Server::Impl {
                 {"message",       {{"role", "assistant"}, {"content", text}}},
                 {"finish_reason", "stop"},
             }})},
-            {"usage", {{"prompt_tokens", 0}, {"completion_tokens", 0}, {"total_tokens", 0}}},
+            {"usage", {{"prompt_tokens", stats.prompt_tokens},
+                       {"completion_tokens", stats.completion_tokens},
+                       {"total_tokens", stats.prompt_tokens + stats.completion_tokens}}},
         };
         res.set_content(resp.dump(), "application/json");
     }

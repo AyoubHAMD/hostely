@@ -279,6 +279,36 @@ C API, so a single `.mm` exports a C ABI for the rest of the codebase).
 > We label the line `current (pub. API)` so you're never misled; trust
 > `self rss` for actual residency.
 
+## Benchmarks
+
+Measured with [`scripts/benchmark.py`](scripts/benchmark.py) on a **Mac mini
+(2024), Apple M4 (10-core), 32 GB unified memory**, HTTP non-streaming,
+greedy decoding (temp 0). Baseline is **Ollama 0.32.5** (`tinyllama:latest`,
+Q4_0) — a slight structural advantage, since Q4_0 is faster per token than
+the higher-quality Q4_K_M hostely serves. Re-run both on your machine:
+
+```sh
+./build/hostely serve <model.gguf> --port 8090 --threads 10
+python3 scripts/benchmark.py --name hostely --url http://localhost:8090
+python3 scripts/benchmark.py --name ollama --url http://localhost:11434 --model <tag> --no-session
+```
+
+![hostely vs Ollama on TinyLlama-1.1B](docs/benchmarks.svg)
+
+| Metric (TinyLlama-1.1B, tok/s) | hostely (Q4_K_M, `--threads 10`) | Ollama 0.32.5 (Q4_0) |
+|---|---|---|
+| Generation | 116 | 123 |
+| Prefill @ 290-token prompt | 1,313 | 1,398 |
+| Prefill @ 1,186-token prompt | 1,366 | 1,701 |
+| Prefill @ 2,370-token prompt | 1,312 | 1,413 |
+| **Multi-turn turn-2 latency** | **216–245 ms vs 1,162–1,172 ms turn 1 (4.8–5.4×)** | — (client can't control slot reuse) |
+
+The honest reading: inference speed is bandwidth-bound and both tools run
+upstream llama.cpp, so they're at parity — within ~6% on generation and
+±20% at prefill peaks. `scripts/benchmark.py` measures through the
+OpenAI-compatible HTTP API of either server, so contributors can reproduce
+on M1/M2/M3 and extend the table.
+
 ## Verifying the build
 
 ```sh
