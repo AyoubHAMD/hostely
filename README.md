@@ -10,7 +10,8 @@
 [![CMake](https://img.shields.io/badge/CMake-3.25%2B-064F8C?style=flat-square&logo=cmake)](https://cmake.org/)
 [![llama.cpp](https://img.shields.io/badge/inference-llama.cpp%20%2B%20ggml--metal-6567FF?style=flat-square)](https://github.com/ggml-org/llama.cpp)
 [![Metal](https://img.shields.io/badge/GPU-Metal-8E8E93?style=flat-square)](https://developer.apple.com/metal/)
-[![license](https://img.shields.io/badge/license-TBD%20(%22all%20rights%20reserved%22%20for%20now)-D4A017?style=flat-square)](#license)
+[![build](https://github.com/AyoubHAMD/hostely/actions/workflows/build.yml/badge.svg?style=flat-square)](../../actions/workflows/build.yml)
+[![license](https://img.shields.io/badge/license-MIT-3DA639?style=flat-square)](LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-1F8A4C?style=flat-square)](CONTRIBUTING.md)
 
 *Self-host services in OCI containers · Serve GGUF models at full Metal speed · See real headroom before you run out of it*
@@ -315,7 +316,28 @@ A PR that hasn't passed the smoke script will be asked to run it.
 
 ## License
 
-TBD — treat the source as "all rights reserved" until a license file lands.
+[MIT](LICENSE) — except `third_party/llama.cpp`, which is bundled as a git
+submodule under its own [MIT license](https://github.com/ggml-org/llama.cpp/blob/master/LICENSE).
+
+## Why not just use Ollama / LM Studio / Docker Desktop?
+
+Fair question. Each is great at its half of the problem:
+
+- **Ollama / LM Studio** serve models at full Metal speed but can't run
+  your other services, and neither tells you *before launch* whether the
+  model fits in what's left of memory right now — after container
+  workloads have taken their share.
+- **Docker Desktop & friends** run containers but pretend the GPU doesn't
+  exist, so your model server and your services coordinate memory by
+  crashing into each other.
+- **Both halves compete for the same unified memory**, and no tool reports
+  them in the same units, at the same time, from the same process.
+
+hostely is one process that answers the question the others can't:
+*"what's the biggest thing I can run on this machine, right now, next to
+what's already running?"* If you only ever serve models and nothing else,
+Ollama is the mature choice. If you run services *next to* models on an
+M-series Mac, that's the gap hostely lives in.
 
 [cpp-httplib]: https://github.com/yhirose/cpp-httplib
 [nlohmann/json]: https://github.com/nlohmann/json

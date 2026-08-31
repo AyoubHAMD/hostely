@@ -1,0 +1,28 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    # macOS runners with Apple Silicon; hostely is Apple-only by design.
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j $(sysctl -n hw.ncpu)
+
+      - name: Smoke test
+        run: ./scripts/smoke.sh
+
+      - name: Show version
+        run: ./build/hostely --version
