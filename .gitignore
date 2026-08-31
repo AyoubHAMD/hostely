@@ -1,0 +1,9 @@
+# build output
+build/
+
+# macOS
+.DS_Store
+
+# local model weights (downloaded by `hostely models pull`, not tracked)
+models/*.gguf
+models/*.toml
