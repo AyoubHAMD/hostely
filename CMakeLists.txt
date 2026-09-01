@@ -115,6 +115,8 @@ add_subdirectory(third_party/llama.cpp ${CMAKE_BINARY_DIR}/_llama_build)
 # -----------------------------------------------------------------------------
 
 add_library(hostely_core STATIC
+    src/apps/app.cpp
+    src/apps/compose.cpp
     src/cli/args.cpp
     src/config/config.cpp
     src/inference/lockfile.cpp

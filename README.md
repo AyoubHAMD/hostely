@@ -16,7 +16,7 @@
 [![license](https://img.shields.io/badge/license-MIT-3DA639?style=flat-square)](LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-1F8A4C?style=flat-square)](CONTRIBUTING.md)
 
-*Self-host services in OCI containers · Serve GGUF models at full Metal speed · See real headroom before you run out of it*
+*Self-host apps and services in OCI containers · Serve GGUF models at full Metal speed · See real headroom before you run out of it*
 
 </div>
 
@@ -70,6 +70,7 @@ this machine, right now?"** — and it answers it before you OOM, not after.
 | | Capability | How |
 |---|---|---|
 **Containers** | Run OCI images as managed services | wraps Apple's official `container` CLI (`posix_spawn`, no daemons)
+| | Deploy a whole compose-defined stack | `hostely app up <dir>` — reads `compose.yaml`/`docker-compose.yml`, no Docker needed
 | | List / stop / logs, repeatable port flags | `hostely ps / stop / logs`
 | | Optional per-service memory ceiling | `setrlimit` + Jetsam `memorystatus_control` (root only)
 **Models** | `hostely models pull` from Hugging Face | resumable curl downloads, quant selectors (`repo:Q4_K_M`), TOML sidecar manifests
@@ -171,13 +172,47 @@ curl -X POST http://localhost:8081/v1/chat/completions \
 ./build/hostely run web --image nginx:alpine --port 8080:80
 ./build/hostely ps
 ./build/hostely stop web
+
+# 8. Or deploy an entire compose-defined app in one command.
+#    Point it at any directory containing a compose.yaml / docker-compose.yml.
+./build/hostely app up ./my-app
+./build/hostely app ps
+./build/hostely app logs my-app server
+./build/hostely app stop my-app
 ```
+
+### `hostely app` — compose files, no Docker
+
+`hostely app up <dir>` finds a `compose.yaml`/`docker-compose.yml` in `<dir>`
+(plus subdirectories, depth 2), translates it for Apple's `container` runtime,
+and launches the stack. Re-running `up` reconciles: unchanged services are
+left running, changed ones are recreated. What gets translated, and why:
+
+- **Ports** — auto-picked next free port when the compose one is taken
+  (printed, and recorded so it's stable across reconciles).
+- **Volumes** — named volumes pass through; relative sources become named
+  volumes (`<app>-<service>-<dest>`); absolute paths stay bind-mounted with a
+  warning (virtiofs on macOS 15 forbids `chown`, so stateful services like
+  postgres must use named volumes).
+- **Service hostnames** — macOS 15's container runtime has no
+  container-to-container DNS, so `PG_DATABASE_HOST=db`-style values are
+  rewritten to your Mac's LAN IP (services reach each other via the host's
+  published ports).
+- **`${VAR:-default}` interpolation** — from `--env K=V` flags, a `.env` next
+  to the compose file, then the process environment.
+- **depends_on** — respected as a start order; healthcheck *conditions* are
+  ignored.
+
+Prebuilt images only for now (`build:` is rejected with a clear message —
+phase 2 will shell out to `container build`).
 
 ## CLI surface
 
 ```
 hostely init                                create config dir + default config.toml
 hostely run <name> [--image img] [--port h:c] [--env K=V] [--mem-gb N]
+hostely app up <dir> [--name A] [--env K=V]  deploy a compose-defined stack
+hostely app ps | logs <app> [svc] | stop <app> | rm <app>
 hostely ps                                  list services
 hostely stop <name>
 hostely logs <name> [--follow]

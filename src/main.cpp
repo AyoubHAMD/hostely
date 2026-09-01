@@ -11,6 +11,7 @@
 //
 // Phase 3+ adds: serve / models / status / resources.
 
+#include "apps/app.hpp"
 #include "cli/args.hpp"
 #include "config/config.hpp"
 #include "inference/lockfile.hpp"
@@ -56,6 +57,7 @@ void print_help() {
         "Commands:\n"
         "  init        create config dir + default config.toml\n"
         "  run         run a service from an OCI image\n"
+        "  app         run a compose-defined stack (up/stop/ps/logs/rm)\n"
         "  ps          list running services\n"
         "  stop        stop a service\n"
         "  logs        show logs for a service\n"
@@ -192,14 +194,40 @@ int run_run(const hostely::config::Config& cfg,
 
     auto operands = args.operands();
     if (operands.empty()) {
-        std::cerr << "Usage: hostely run <name> --image <image> [--port h:c]...\n";
+        std::cerr << "Usage: hostely run <name> --image <image> [--port h:c]...\n"
+                  << "      [--env K=V]... [--volume src:dst]... [-- cmd arg...]\n";
         return 2;
     }
     services::RunOptions opts;
     opts.name = std::string(operands[0]);
     if (auto v = args.get("image")) opts.image = *v;
     opts.ports = parse_ports(args);
-    // TODO(phase 2+): --env K=V, --volume src:dst, -- arg...
+
+    // --env K=V and --volume src:dst, both repeatable. Anything after a bare
+    // "--" is passed through as the container's command + args.
+    for (const auto& o : args.options()) {
+        if (o.name == "env" && !o.value.empty()) {
+            auto eq = o.value.find('=');
+            if (eq == std::string::npos) {
+                error("--env expects KEY=VALUE, got '" + o.value + "'");
+                return 2;
+            }
+            opts.env.emplace_back(o.value.substr(0, eq), o.value.substr(eq + 1));
+        } else if (o.name == "volume" && !o.value.empty()) {
+            auto colon = o.value.find(':');
+            if (colon == std::string::npos) {
+                error("--volume expects src:dst, got '" + o.value + "'");
+                return 2;
+            }
+            opts.volumes.emplace_back(o.value.substr(0, colon),
+                                      o.value.substr(colon + 1));
+        }
+    }
+    // Positionals after the service name are the container command (the
+    // parser funnels everything after a bare "--" into positionals).
+    for (std::size_t i = 1; i < operands.size(); ++i) {
+        opts.args.emplace_back(operands[i]);
+    }
 
     if (opts.image.empty()) {
         error("--image is required");
@@ -795,6 +823,133 @@ hostely::log::Level parse_level(std::string_view s) {
 
 }  // namespace
 
+// ----------------------------------------------------------------------------
+// app (compose-defined stacks)
+// ----------------------------------------------------------------------------
+
+namespace {
+
+int run_app(const hostely::config::Config& cfg,
+            const hostely::cli::ParsedArgs& args) {
+    using namespace hostely;
+    using namespace hostely::log;
+
+    auto operands = args.operands();
+    if (operands.empty()) {
+        std::cerr <<
+            "Usage: hostely app up <dir> [--name app] [--env K=V]...\n"
+            "       hostely app stop <app>\n"
+            "       hostely app ps\n"
+            "       hostely app logs <app> [service] [--follow]\n"
+            "       hostely app rm <app>\n"
+            "\n"
+            "`up` finds a compose.yaml / docker-compose.yml in <dir> (depth 2),\n"
+            "translates it for Apple's container runtime, and launches it.\n"
+            "Re-running `up` reconciles: unchanged services stay up, changed\n"
+            "ones are recreated.\n";
+        return 2;
+    }
+
+    auto mgr = make_manager(cfg);
+    if (!mgr) return 1;
+
+    const std::string subcmd = std::string(operands[0]);
+
+    if (subcmd == "up") {
+        if (operands.size() < 2) {
+            std::cerr << "Usage: hostely app up <dir> [--name app] [--env K=V]...\n";
+            return 2;
+        }
+        std::vector<std::pair<std::string, std::string>> env;
+        for (const auto& o : args.options()) {
+            if (o.name != "env" || o.value.empty()) continue;
+            auto eq = o.value.find('=');
+            if (eq == std::string::npos) {
+                error("--env expects KEY=VALUE, got '" + o.value + "'");
+                return 2;
+            }
+            env.emplace_back(o.value.substr(0, eq), o.value.substr(eq + 1));
+        }
+        std::optional<std::string> name_override;
+        if (auto v = args.get("name")) name_override = *v;
+
+        std::vector<std::string> messages;
+        apps::AppError err;
+        auto r = apps::app_up(std::string(operands[1]), name_override, env,
+                              *mgr, messages, err);
+        for (const auto& m : messages) std::cout << m << '\n';
+        if (!r) {
+            std::cout << "\n";
+            error(err.message);
+            return 1;
+        }
+        std::cout << "\napp '" << (name_override ? *name_override
+                              : apps::app_name_from_dir(std::string(operands[1])))
+                  << "' is up.\n";
+        return 0;
+    }
+
+    if (subcmd == "stop") {
+        if (operands.size() < 2) {
+            std::cerr << "Usage: hostely app stop <app>\n";
+            return 2;
+        }
+        std::vector<std::string> messages;
+        apps::AppError err;
+        auto r = apps::app_stop(std::string(operands[1]), *mgr, messages, err);
+        for (const auto& m : messages) std::cout << m << '\n';
+        if (!r) { error(err.message); return 1; }
+        return 0;
+    }
+
+    if (subcmd == "ps") {
+        apps::AppError err;
+        auto r = apps::app_ps(*mgr, err);
+        if (!r) { error(err.message); return 1; }
+        if (r->empty()) { std::cout << "no apps (run `hostely app up <dir>`)\n"; return 0; }
+        for (const auto& [app, lines] : *r) {
+            std::cout << app << '\n';
+            for (const auto& line : lines) std::cout << "  " << line << '\n';
+        }
+        return 0;
+    }
+
+    if (subcmd == "logs") {
+        if (operands.size() < 2) {
+            std::cerr << "Usage: hostely app logs <app> [service] [--follow]\n";
+            return 2;
+        }
+        apps::AppError err;
+        std::optional<std::string> svc;
+        if (operands.size() >= 3) svc = std::string(operands[2]);
+        auto r = apps::app_logs(std::string(operands[1]), svc, args.has("follow"),
+                                *mgr, err);
+        if (!r) { error(err.message); return 1; }
+        std::cout << *r;
+        return 0;
+    }
+
+    if (subcmd == "rm") {
+        if (operands.size() < 2) {
+            std::cerr << "Usage: hostely app rm <app>\n";
+            return 2;
+        }
+        std::vector<std::string> messages;
+        apps::AppError err;
+        auto r = apps::app_rm(std::string(operands[1]), *mgr, messages, err);
+        for (const auto& m : messages) std::cout << m << '\n';
+        if (!r) { error(err.message); return 1; }
+        std::cout << "app '" << operands[1] << "' removed.\n";
+        return 0;
+    }
+
+    std::cerr << "hostely app: unknown subcommand '" << subcmd << "'\n"
+              << "Expected up | stop | ps | logs | rm.\n";
+    return 2;
+}
+
+}  // namespace
+
 int main(int argc, const char* const argv[]) {
     using namespace hostely;
     using namespace hostely::log;
@@ -837,6 +992,7 @@ int main(int argc, const char* const argv[]) {
     if (cmd == "init")    return run_init();
     if (cmd == "doctor")  return run_doctor();
     if (cmd == "run")     return run_run(cfg, args);
+    if (cmd == "app")     return run_app(cfg, args);
     if (cmd == "ps")      return run_ps(cfg);
     if (cmd == "stop")    return run_stop(cfg, args);
     if (cmd == "logs")    return run_logs(cfg, args);
