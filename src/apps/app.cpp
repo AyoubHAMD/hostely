@@ -129,12 +129,6 @@ bool port_in_use(int port) {
     return rc == 0;
 }
 
-int pick_free_host_port(int wanted) {
-    int p = wanted;
-    while (p < 65535 && port_in_use(p)) ++p;
-    return p;
-}
-
 // FNV-1a — a stable config fingerprint; cryptographic strength is not needed.
 std::string fnv1a(const std::string& s) {
     uint64_t h = 1469598103934665603ull;
@@ -290,6 +284,10 @@ std::optional<bool> app_up(const std::string& dir,
     }
 
     std::string host = lan_ip();
+    // Host ports claimed by containers created earlier in this same run: a
+    // fresh container's forwarded port is not yet a live listener, so
+    // port_in_use() cannot see it and two services could collide on it.
+    std::set<int> claimed_ports;
     std::set<std::string> svc_names;
     for (const auto& s : ordered) svc_names.insert(s.name);
 
@@ -303,11 +301,25 @@ std::optional<bool> app_up(const std::string& dir,
         ro.image = s.image;
         ro.args = s.command;
 
-        // Env: rewrite service-name hostnames to the host LAN IP.
+        // Env: rewrite service-name hostnames to the host LAN IP — but only
+        // in keys that carry network addresses. A value that merely equals a
+        // service name in another context (e.g. GOTRUE_DB_DRIVER=postgres)
+        // must be left alone.
+        auto looks_like_addr = [](const std::string& k) {
+            std::string u = k;
+            for (auto& c : u) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            return u.find("HOST") != std::string::npos ||
+                   u.find("URL") != std::string::npos ||
+                   u.find("ENDPOINT") != std::string::npos ||
+                   u.find("ADDR") != std::string::npos ||
+                   u.find("URI") != std::string::npos;
+        };
         for (auto& [k, v] : s.env) {
-            for (const auto& other : svc_names) {
-                if (other == s.name || other.empty()) continue;
-                if (v == other) v = host;
+            if (looks_like_addr(k)) {
+                for (const auto& other : svc_names) {
+                    if (other == s.name || other.empty()) continue;
+                    if (v == other) v = host;
+                }
             }
             ro.env.emplace_back(k, v);
         }
@@ -373,12 +385,14 @@ std::optional<bool> app_up(const std::string& dir,
             int wanted = atoi(h.c_str());
             if (wanted <= 0) { ro.ports.emplace_back(h, c); continue; }
             int actual = wanted;
-            if (port_in_use(wanted)) {
-                actual = pick_free_host_port(wanted + 1);
+            if (port_in_use(wanted) || claimed_ports.count(wanted)) {
+                actual = wanted + 1;
+                while (port_in_use(actual) || claimed_ports.count(actual)) ++actual;
                 messages.push_back("[info] host port " + std::to_string(wanted) +
                                    " in use; " + s.name + " uses " +
                                    std::to_string(actual) + " instead");
             }
+            claimed_ports.insert(actual);
             ro.ports.emplace_back(std::to_string(actual), c);
         }
 
