@@ -331,23 +331,11 @@ std::optional<bool> app_up(const std::string& dir,
             }
         }
 
-        // Ports: auto-pick when the wanted host port is taken.
-        for (auto& [h, c] : s.ports) {
-            int wanted = atoi(h.c_str());
-            if (wanted <= 0) { ro.ports.emplace_back(h, c); continue; }
-            int actual = wanted;
-            if (port_in_use(wanted)) {
-                actual = pick_free_host_port(wanted + 1);
-                messages.push_back("[info] host port " + std::to_string(wanted) +
-                                   " in use; " + s.name + " uses " +
-                                   std::to_string(actual) + " instead");
-            }
-            ro.ports.emplace_back(std::to_string(actual), c);
-        }
-
         std::string fingerprint = config_fingerprint(s);
 
-        // 3. Reconcile.
+        // 3. Reconcile — decide BEFORE picking ports: a container that is
+        // about to be recreated must not hold its old port hostage (the new
+        // one would drift to a different host port).
         bool needs_run = true;
         AppState old;
         if (load_state(app, old)) {
@@ -364,11 +352,9 @@ std::optional<bool> app_up(const std::string& dir,
                     if (running) {
                         needs_run = false;
                         messages.push_back("[ok] " + s.name + " up to date (" + ro.name + ")");
-                        ro.ports = old_svc.ports;   // keep auto-picked ports
                     } else if (exists) {
                         // Stopped but unchanged: start it again, don't recreate.
                         needs_run = false;
-                        ro.ports = old_svc.ports;
                         auto started = cli_container({"start", ro.name});
                         if (started.ok() && *started.value) {
                             messages.push_back("[started] " + s.name + " (" + ro.name + ")");
@@ -378,6 +364,29 @@ std::optional<bool> app_up(const std::string& dir,
                         }
                     }
                 }
+            }
+        }
+
+        // Ports: auto-pick when the wanted host port is taken. For a service
+        // being recreated, the stale container was already stopped above.
+        for (auto& [h, c] : s.ports) {
+            int wanted = atoi(h.c_str());
+            if (wanted <= 0) { ro.ports.emplace_back(h, c); continue; }
+            int actual = wanted;
+            if (port_in_use(wanted)) {
+                actual = pick_free_host_port(wanted + 1);
+                messages.push_back("[info] host port " + std::to_string(wanted) +
+                                   " in use; " + s.name + " uses " +
+                                   std::to_string(actual) + " instead");
+            }
+            ro.ports.emplace_back(std::to_string(actual), c);
+        }
+
+        // Unchanged services keep the ports recorded in state (stable across
+        // reconciles even if something else transiently held the port).
+        if (!needs_run && old.services.size() > 0) {
+            for (const auto& old_svc : old.services) {
+                if (old_svc.service == s.name) ro.ports = old_svc.ports;
             }
         }
 
