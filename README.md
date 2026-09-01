@@ -16,6 +16,7 @@
 [![license](https://img.shields.io/badge/license-MIT-3DA639?style=flat-square)](LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-1F8A4C?style=flat-square)](CONTRIBUTING.md)
 [![Sponsor](https://img.shields.io/badge/Sponsor-❤-EA4AAA?style=flat-square)](https://github.com/sponsors/AyoubHAMD)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-buy%20me%20a%20coffee-FF5E5B?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/ayohbh)
 
 *Self-host apps and services in OCI containers · Serve GGUF models at full Metal speed · See real headroom before you run out of it*
 
