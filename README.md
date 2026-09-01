@@ -15,6 +15,7 @@
 [![build](https://github.com/AyoubHAMD/hostely/actions/workflows/build.yml/badge.svg?style=flat-square)](../../actions/workflows/build.yml)
 [![license](https://img.shields.io/badge/license-MIT-3DA639?style=flat-square)](LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-1F8A4C?style=flat-square)](CONTRIBUTING.md)
+[![Sponsor](https://img.shields.io/badge/Sponsor-❤-EA4AAA?style=flat-square)](https://github.com/sponsors/AyoubHAMD)
 
 *Self-host apps and services in OCI containers · Serve GGUF models at full Metal speed · See real headroom before you run out of it*
 
