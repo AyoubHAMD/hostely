@@ -106,6 +106,14 @@ this machine, right now?"** — and it answers it before you OOM, not after.
 
 ## Build
 
+**Homebrew** (builds from source; llama.cpp + ggml-metal included):
+
+```sh
+brew install AyoubHAMD/tap/hostely
+```
+
+**From source:**
+
 ```sh
 git clone --recurse-submodules https://github.com/AyoubHAMD/hostely.git
 cd hostely
