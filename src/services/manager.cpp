@@ -164,6 +164,10 @@ Outcome<std::string> Manager::run(const RunOptions& opts) {
         argv.push_back("-v");
         argv.push_back(src + ":" + dst);
     }
+    for (const auto& ns : opts.dns) {
+        argv.push_back("--dns");
+        argv.push_back(ns);
+    }
     argv.push_back(opts.image);
     for (const auto& a : opts.args) argv.push_back(a);
 

@@ -14,6 +14,7 @@ struct RunOptions {
     std::vector<std::pair<std::string, std::string>> env;     // KEY=VALUE
     std::vector<std::pair<std::string, std::string>> volumes; // src:dst
     std::vector<std::string>          args;     // appended after image
+    std::vector<std::string>          dns;      // --dns nameserver IPs
 };
 
 /// What `hostely ps` returns, one row per service.

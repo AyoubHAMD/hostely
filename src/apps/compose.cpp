@@ -345,6 +345,22 @@ std::vector<std::string> parse_depends_on(const Node& n) {
     return out;
 }
 
+// dns: 8.8.8.8            (scalar)
+// dns: [8.8.8.8, 1.1.1.1] (list)
+std::vector<std::string> parse_dns(const Node& n) {
+    std::vector<std::string> out;
+    if (n.kind == Node::Kind::Seq) {
+        for (const auto& item : n.seq) {
+            auto ip = trim(node_scalar(item));
+            if (!ip.empty()) out.push_back(ip);
+        }
+    } else {
+        auto ip = trim(node_scalar(n));
+        if (!ip.empty()) out.push_back(ip);
+    }
+    return out;
+}
+
 }  // namespace
 
 std::optional<ComposeFile> load_compose(const std::string& path,
@@ -415,6 +431,10 @@ std::optional<ComposeFile> load_compose(const std::string& path,
                 s.command = parse_command(it->second);
             if (auto it = body.map.find("depends_on"); it != body.map.end())
                 s.depends_on = parse_depends_on(it->second);
+            if (auto it = body.map.find("dns"); it != body.map.end()) {
+                s.dns = parse_dns(it->second);
+                for (auto& ip : s.dns) ip = interpolate(ip, env);
+            }
             out.services.push_back(std::move(s));
         }
         if (out.services.empty()) {

@@ -210,6 +210,9 @@ left running, changed ones are recreated. What gets translated, and why:
   published ports).
 - **`${VAR:-default}` interpolation** — from `--env K=V` flags, a `.env` next
   to the compose file, then the process environment.
+- **DNS** — a `dns:` key per service (`dns: [8.8.8.8, 1.1.1.1]`) sets custom
+  nameservers; `hostely run` accepts repeatable `--dns <ip>`. Useful when a
+  service must resolve private hostnames, or to pin a known resolver.
 - **depends_on** — respected as a start order; healthcheck *conditions* are
   ignored.
 
@@ -220,7 +223,7 @@ phase 2 will shell out to `container build`).
 
 ```
 hostely init                                create config dir + default config.toml
-hostely run <name> [--image img] [--port h:c] [--env K=V] [--mem-gb N]
+hostely run <name> [--image img] [--port h:c] [--env K=V] [--dns <ip>] [--mem-gb N]
 hostely app up <dir> [--name A] [--env K=V]  deploy a compose-defined stack
 hostely app ps | logs <app> [svc] | stop <app> | rm <app>
 hostely ps                                  list services

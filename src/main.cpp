@@ -195,7 +195,7 @@ int run_run(const hostely::config::Config& cfg,
     auto operands = args.operands();
     if (operands.empty()) {
         std::cerr << "Usage: hostely run <name> --image <image> [--port h:c]...\n"
-                  << "      [--env K=V]... [--volume src:dst]... [-- cmd arg...]\n";
+                  << "      [--env K=V]... [--volume src:dst]... [--dns <ip>]... [-- cmd arg...]\n";
         return 2;
     }
     services::RunOptions opts;
@@ -213,6 +213,9 @@ int run_run(const hostely::config::Config& cfg,
                 return 2;
             }
             opts.env.emplace_back(o.value.substr(0, eq), o.value.substr(eq + 1));
+        } else if (o.name == "dns" && !o.value.empty()) {
+            // Repeatable: --dns 8.8.8.8 --dns 1.1.1.1
+            opts.dns.push_back(o.value);
         } else if (o.name == "volume" && !o.value.empty()) {
             auto colon = o.value.find(':');
             if (colon == std::string::npos) {

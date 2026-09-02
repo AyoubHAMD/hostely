@@ -25,6 +25,7 @@ struct ComposeService {
     std::vector<std::pair<std::string, std::string>> volumes; // src:dst
     std::vector<std::string> command;        // split words; empty = image default
     std::vector<std::string> depends_on;     // service names, conditions ignored
+    std::vector<std::string> dns;            // custom nameserver IPs for the service
 };
 
 struct ComposeFile {
