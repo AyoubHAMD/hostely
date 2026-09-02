@@ -381,6 +381,14 @@ std::optional<bool> app_up(const std::string& dir,
             }
         }
 
+        // Recreating: stop + remove the stale container NOW, before ports are
+        // picked — otherwise its forwarded ports still look "in use" and the
+        // replacement drifts to different host ports.
+        if (needs_run) {
+            (void)mgr.stop(ro.name);
+            (void)rm_container(mgr, ro.name);
+        }
+
         // Ports: auto-pick when the wanted host port is taken. For a service
         // being recreated, the stale container was already stopped above.
         for (auto& [h, c] : s.ports) {
@@ -413,10 +421,8 @@ std::optional<bool> app_up(const std::string& dir,
         st.config_hash = fingerprint;
         st.ports = ro.ports;
         if (needs_run) {
-            // Stop + remove any stale container with this name (config
-            // changed, or a previous failed run left one behind).
-            (void)mgr.stop(ro.name);
-            (void)rm_container(mgr, ro.name);
+            // (stale container was already stopped + removed above, before
+            // port picking)
             auto r = mgr.run(ro);
             if (!r.ok()) {
                 err = {"failed to start " + s.name + ": " + r.error->message};
