@@ -435,6 +435,8 @@ std::optional<ComposeFile> load_compose(const std::string& path,
                 s.dns = parse_dns(it->second);
                 for (auto& ip : s.dns) ip = interpolate(ip, env);
             }
+            if (auto it = body.map.find("mem_limit"); it != body.map.end())
+                s.mem_limit = interpolate(trim(node_scalar(it->second)), env);
             out.services.push_back(std::move(s));
         }
         if (out.services.empty()) {

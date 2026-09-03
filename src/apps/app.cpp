@@ -146,6 +146,7 @@ std::string config_fingerprint(const ComposeService& s) {
     j["volumes"] = s.volumes;
     j["command"] = s.command;
     j["dns"] = s.dns;
+    j["mem_limit"] = s.mem_limit;
     return fnv1a(j.dump());
 }
 
@@ -302,6 +303,7 @@ std::optional<bool> app_up(const std::string& dir,
         ro.image = s.image;
         ro.args = s.command;
         ro.dns = s.dns;
+        ro.memory = s.mem_limit;
 
         // Env: rewrite service-name hostnames to the host LAN IP — but only
         // in keys that carry network addresses. A value that merely equals a

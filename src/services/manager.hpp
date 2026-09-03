@@ -15,6 +15,7 @@ struct RunOptions {
     std::vector<std::pair<std::string, std::string>> volumes; // src:dst
     std::vector<std::string>          args;     // appended after image
     std::vector<std::string>          dns;      // --dns nameserver IPs
+    std::string                       memory;   // --memory, e.g. "8g"; empty = container default
 };
 
 /// What `hostely ps` returns, one row per service.

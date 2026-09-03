@@ -168,6 +168,10 @@ Outcome<std::string> Manager::run(const RunOptions& opts) {
         argv.push_back("--dns");
         argv.push_back(ns);
     }
+    if (!opts.memory.empty()) {
+        argv.push_back("--memory");
+        argv.push_back(opts.memory);
+    }
     argv.push_back(opts.image);
     for (const auto& a : opts.args) argv.push_back(a);
 
