@@ -70,6 +70,16 @@ public:
     /// (container CLI supports `-q` quiet + `--format`).
     Outcome<std::vector<ServiceInfo>> list();
 
+    /// `container ls --format json` — raw JSON text, for callers that need
+    /// fields the table parse can't carry (image reference, resources, IPs).
+    /// No parsing happens here; the caller owns the JSON.
+    Outcome<std::string> list_json();
+
+    /// `container stats --format json --no-stream` — raw JSON text. Each
+    /// entry: id, cpuUsageUsec (cumulative), memoryUsageBytes/LimitBytes,
+    /// networkRxBytes/TxBytes, blockReadBytes/WriteBytes, numProcesses.
+    Outcome<std::string> stats_json();
+
     /// Stop a service by name. Idempotent: stopping a stopped service is OK.
     Outcome<bool> stop(const std::string& name);
 

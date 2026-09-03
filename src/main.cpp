@@ -25,6 +25,7 @@
 #include "resources/system.hpp"
 #include "services/cli.hpp"
 #include "services/manager.hpp"
+#include "top/top.hpp"
 
 #include <atomic>
 #include <csignal>
@@ -64,6 +65,7 @@ void print_help() {
         "  serve       serve an LLM (llama.cpp / ggml-metal backend)\n"
         "  models      pull/list/path/rm local GGUF models from Hugging Face\n"
         "  status      system-wide CPU/RAM/GPU memory pressure\n"
+        "  top         live htop-style dashboard of containers + resources\n"
         "  resources   detailed per-service resource accounting\n"
         "  doctor      verify hostely can run on this machine\n"
         "\n"
@@ -969,15 +971,21 @@ int main(int argc, const char* const argv[]) {
         return 0;
     }
 
-    // From here on, we want logs.
+    // From here on, we want logs. `top` runs a full-screen TUI: stderr output
+    // would corrupt the display, so only its file sink is enabled.
     Level level = Level::Info;
     if (auto v = args.get("log-level")) level = parse_level(*v);
     bool file_log = !args.has("no-log-file");
+    const bool is_top = args.command() == "top";
 
     if (file_log) {
         if (paths::ensure_log_dir()) {
             auto log_path = paths::log_dir() / "hostely.log";
-            init(level, log_path.string());
+            if (is_top) {
+                init_file_only(level, log_path.string());
+            } else {
+                init(level, log_path.string());
+            }
         } else {
             init(level);  // stderr only
             warn("could not create log directory; file logging disabled.");
@@ -986,7 +994,7 @@ int main(int argc, const char* const argv[]) {
         init(level);
     }
 
-    info(kBanner);
+    if (!is_top) info(kBanner);
 
     // Load config (defaults if missing — same as config::load does).
     auto cfg = config::load(paths::config_file()).value_or(config::defaults());
@@ -1001,6 +1009,7 @@ int main(int argc, const char* const argv[]) {
     if (cmd == "logs")    return run_logs(cfg, args);
     if (cmd == "serve")   return run_serve(cfg, args);
     if (cmd == "status")  return run_status();
+    if (cmd == "top")     return top::run_top(cfg, args);
     if (cmd == "models")  return run_models(args);
 
     // Remaining commands get a stub for now so --help is honest about scope.

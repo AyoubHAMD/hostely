@@ -95,6 +95,42 @@ std::vector<ServiceInfo> parse_ls(const std::string& text) {
     return out;
 }
 
+// Shared body for `container <args...> --format json`: same guards and
+// error mapping as list(), returns the raw stdout JSON. Callers own parsing.
+Outcome<std::string> run_json(const std::string& cli_path_,
+                              const std::vector<std::string>& args,
+                              const char* what) {
+    Outcome<std::string> out;
+    if (cli_path_.empty()) {
+        out.error = ManagerError{ManagerError::Kind::CliNotFound,
+                                 install_instructions(), {}};
+        return out;
+    }
+    std::vector<std::string> argv{cli_path_};
+    argv.insert(argv.end(), args.begin(), args.end());
+    auto r = cli::run(argv);
+    if (!r.started()) {
+        out.error = ManagerError{ManagerError::Kind::CliNotFound,
+                                 "could not launch container CLI", r.stderr_text};
+        return out;
+    }
+    if (r.exit_code != 0) {
+        std::string err = tail(r.stderr_text, 2048);
+        if (contains_ci(err, "system start")) {
+            out.error = ManagerError{ManagerError::Kind::SystemNotStarted,
+                "the container system has not been started.\n"
+                "  Run `container system start` once, then retry.",
+                err};
+        } else {
+            out.error = ManagerError{ManagerError::Kind::NonZeroExit,
+                                     what, err};
+        }
+        return out;
+    }
+    out.value = r.stdout_text;
+    return out;
+}
+
 }  // namespace
 
 std::string install_instructions() {
@@ -232,6 +268,15 @@ Outcome<std::vector<ServiceInfo>> Manager::list() {
     }
     out.value = parse_ls(r.stdout_text);
     return out;
+}
+
+Outcome<std::string> Manager::list_json() {
+    return run_json(cli_path_, {"ls", "--format", "json"}, "container ls failed");
+}
+
+Outcome<std::string> Manager::stats_json() {
+    return run_json(cli_path_, {"stats", "--format", "json", "--no-stream"},
+                    "container stats failed");
 }
 
 Outcome<bool> Manager::stop(const std::string& name) {

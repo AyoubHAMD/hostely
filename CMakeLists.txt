@@ -132,6 +132,10 @@ add_library(hostely_core STATIC
     src/resources/metal_probe.mm
     src/services/cli.cpp
     src/services/manager.cpp
+    src/top/sample.cpp
+    src/top/render.cpp
+    src/top/top.cpp
+    src/top/tui.cpp
 )
 
 # The single .mm file compiles as Obj-C++; the rest of the library is C++.

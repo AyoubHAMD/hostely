@@ -61,6 +61,11 @@ bool& file_enabled_ref() {
     return b;
 }
 
+bool& stderr_enabled_ref() {
+    static bool b = true;
+    return b;
+}
+
 // ---- helpers --------------------------------------------------------------
 
 std::string timestamp() {
@@ -153,6 +158,13 @@ void init(Level level, std::string_view logfile_path,
     }
 }
 
+void init_file_only(Level level, std::string_view logfile_path,
+                    std::size_t max_bytes, std::size_t keep_files) {
+    init(level, logfile_path, max_bytes, keep_files);
+    std::lock_guard<std::mutex> lock(sink_mutex());
+    stderr_enabled_ref() = false;
+}
+
 void emit(Level level, std::string_view message) {
     if (static_cast<int>(level) < static_cast<int>(level_ref())) return;
 
@@ -166,7 +178,7 @@ void emit(Level level, std::string_view message) {
     line += '\n';
 
     std::lock_guard<std::mutex> lock(sink_mutex());
-    std::cerr << line;
+    if (stderr_enabled_ref()) std::cerr << line;
     if (file_enabled_ref() && file_stream().is_open()) {
         rotate_if_needed(line.size());
         file_stream() << line;

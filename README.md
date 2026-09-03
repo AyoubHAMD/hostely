@@ -83,6 +83,7 @@ this machine, right now?"** — and it answers it before you OOM, not after.
 | | **Session KV reuse** | `X-Session-Id` keeps one KV sequence per conversation — turn 2+ prefills only the new tokens (~10× faster than re-reading history)
 | | LRU session table | 32 concurrent sessions in one shared `n_ctx` KV pool (`kv_unified`)
 **Observability** | `hostely status` | system RAM, CPU, Metal limits, serve headroom, and the loaded model — one screen
+| | `hostely top` | live htop-style dashboard: per-container CPU, memory bars, network/disk rates, process counts — next to host RAM and load; `k` stops the selected container (two-press confirm), `--once` for a scriptable snapshot
 | | `hostely doctor` | checks container CLI, llama.cpp, Metal, root/entitlement, paths
 | | Serve lockfile | `serve.lock.json` with pid liveness + stale-lock detection
 
