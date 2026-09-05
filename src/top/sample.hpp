@@ -35,8 +35,19 @@ struct ContainerRow {
 
 struct HostSummary {
     std::uint64_t mem_total = 0, mem_used = 0;
+    std::uint64_t avail_bytes = 0;   // free + inactive - 2 GiB safety (serve headroom)
     int cores = 0;
     double load1 = 0, load5 = 0, load15 = 0;
+    // Metal / unified-GPU pool (host-level; containers have no GPU access,
+    // so this is per-machine, not per-container)
+    bool gpu_available = false;
+    std::uint64_t gpu_recommended = 0;   // MTLDevice.recommendedMaxWorkingSetSize
+    // `hostely serve` state from the serve lockfile ("" = nothing serving)
+    bool serving = false;
+    std::string model_name;
+    std::uint64_t model_rss = 0;         // fit-advisor estimate from the lock
+    // swap + pressure
+    std::uint64_t swap_total = 0, swap_used = 0;
 };
 
 struct Snapshot {

@@ -1,11 +1,16 @@
 #include "top/sample.hpp"
 
-#include "services/manager.hpp"
+#include "inference/lockfile.hpp"
+#include "paths.hpp"
+#include "resources/metal_probe.hpp"
 #include "resources/system.hpp"
+#include "services/manager.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstdlib>
+#include <sys/sysctl.h>
 
 namespace hostely::top {
 
@@ -123,6 +128,34 @@ std::map<std::string, RawSample> parse_stats(const std::string& text) {
     return out;
 }
 
+// "total = 1024.00M used = 64.00M free = 960.00M" (sysctl vm.swapusage)
+void parse_swap_usage(std::uint64_t& total, std::uint64_t& used) {
+    char buf[256] = {0};
+    std::size_t len = sizeof buf - 1;
+    if (sysctlbyname("vm.swapusage", buf, &len, nullptr, 0) != 0) return;
+    auto parse_one = [&](const std::string& key) -> std::uint64_t {
+        const char* hit = std::strstr(buf, key.c_str());
+        if (!hit) return 0;
+        double v = std::strtod(hit + key.size(), nullptr);
+        // multiplier letter follows the number ("1024.00M")
+        const char* p = std::strpbrk(hit + key.size(), "BKMGTP");
+        double mult = 1024.0 * 1024.0;   // vm.swapusage reports M
+        if (p) {
+            switch (*p) {
+                case 'B': mult = 1; break;
+                case 'K': mult = 1024; break;
+                case 'M': mult = 1024.0 * 1024; break;
+                case 'G': mult = 1024.0 * 1024 * 1024; break;
+                case 'T': mult = 1024.0 * 1024 * 1024 * 1024ull; break;
+                default: break;
+            }
+        }
+        return static_cast<std::uint64_t>(v * mult);
+    };
+    total = parse_one("total = ");
+    used = parse_one("used = ");
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -147,8 +180,32 @@ Snapshot sample_once(services::Manager& mgr,
         auto c = resources::read_cpu();
         h.mem_total = m.total_bytes;
         h.mem_used = m.active_bytes + m.wired_bytes + m.compressed_bytes;
+        // Same serve-headroom formula `hostely status` reports: free + inactive
+        // minus a 2 GiB safety margin.
+        std::uint64_t freeable = m.free_bytes + m.inactive_bytes;
+        const std::uint64_t safety = 2ull * 1024 * 1024 * 1024;
+        h.avail_bytes = freeable > safety ? freeable - safety : 0;
         h.cores = c.logical_cores;
         h.load1 = c.load_1min; h.load5 = c.load_5min; h.load15 = c.load_15min;
+
+        // Metal ceiling (host-level; containers have no GPU access at all).
+        h.gpu_available = hostely_metal_available() != 0;
+        if (h.gpu_available) {
+            h.gpu_recommended = hostely_metal_recommended_max_bytes();
+        }
+
+        // Serving model from the serve lockfile (stale lock = not serving).
+        std::string lock_err;
+        bool stale = false;
+        if (auto lock = inference::read_serve_lock(lock_err, stale);
+            lock && !stale && lock_err.empty()) {
+            h.serving = true;
+            h.model_name = lock->display_name.empty() ? lock->model_path
+                                                      : lock->display_name;
+            h.model_rss = lock->peak_rss_bytes;
+        }
+
+        parse_swap_usage(h.swap_total, h.swap_used);
         return h;
     }();
 

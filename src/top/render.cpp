@@ -495,26 +495,81 @@ std::vector<std::string> render_screen(const Snapshot& snap,
         lines.push_back(panel_bottom(width, color));
     }
 
-    // ---- net panel ---------------------------------------------------------
+    // ---- net | vram panels -------------------------------------------------
     double trx = 0, ttx = 0;
     for (const auto& r : rows) {
         if (r.net_rx_bps > 0) trx += r.net_rx_bps;
         if (r.net_tx_bps > 0) ttx += r.net_tx_bps;
     }
-    int net_w = width;
-    lines.push_back(panel_top("net", net_w, color));
     {
-        auto ng = braille_graph(Hrx, net_w - 4, 2);
-        for (const auto& gl : ng)
-            lines.push_back(panel_line(colorize(gl, kNetCol, color), net_w, color));
+        int lw = width / 2, rw = width - lw;
+
+        std::vector<std::string> lnet, lvram;
+        lnet.push_back(panel_top("net", lw, color));
+        for (const auto& gl : braille_graph(Hrx, lw - 4, 2))
+            lnet.push_back(panel_line(colorize(gl, kNetCol, color), lw, color));
+        std::ostringstream nt;
+        nt << "rx " << fmt_rate(trx) << "   tx " << fmt_rate(ttx);
+        lnet.push_back(panel_line(nt.str(), lw, color));
+        lnet.push_back(panel_bottom(lw, color));
+
+        // vram: the unified GPU pool. Containers have no Metal access, so this
+        // is host-level: the Metal ceiling plus whatever `hostely serve` holds.
+        const auto& host = snap.host;
+        std::ostringstream v1;
+        if (host.gpu_available && host.gpu_recommended > 0) {
+            v1 << "ceiling " << resources::human_bytes(host.gpu_recommended);
+        } else {
+            v1 << "metal n/a";
+        }
+        std::ostringstream v2;
+        if (host.serving) {
+            v2 << "model " << (host.model_rss > 0
+                                   ? resources::human_bytes(host.model_rss) + " (est)"
+                                   : std::string("?"))
+               << "  " << host.model_name;
+        } else {
+            v2 << "no model served";
+        }
+        std::uint64_t containers_mem = 0;
+        for (const auto& r : rows) containers_mem += r.mem_bytes;
+        std::ostringstream v3;
+        v3 << "containers " << resources::human_bytes(containers_mem)
+           << "  of " << resources::human_bytes(host.mem_total) << " unified";
+        lvram.push_back(panel_top("vram", rw, color));
+        lvram.push_back(panel_line(v1.str(), rw, color));
+        lvram.push_back(panel_line(v2.str(), rw, color));
+        lvram.push_back(panel_line(v3.str(), rw, color));
+        lvram.push_back(panel_bottom(rw, color));
+
+        for (std::size_t i = 0; i < lnet.size(); ++i) {
+            lines.push_back(lnet[i] + (i < lvram.size() ? lvram[i] : ""));
+        }
     }
-    std::ostringstream nt;
-    nt << "rx " << fmt_rate(trx) << "   tx " << fmt_rate(ttx);
-    lines.push_back(panel_line(nt.str(), net_w, color));
-    lines.push_back(panel_bottom(net_w, color));
+
+    // ---- pressure panel ----------------------------------------------------
+    {
+        const auto& host = snap.host;
+        std::ostringstream p1;
+        if (host.swap_total > 0) {
+            p1 << std::fixed << std::setprecision(1)
+               << (100.0 * host.swap_used / host.swap_total) << "% of swap used ("
+               << resources::human_bytes(host.swap_used) << " of "
+               << resources::human_bytes(host.swap_total) << ")";
+        } else {
+            p1 << "swap unused";
+        }
+        std::ostringstream p2;
+        p2 << "available " << resources::human_bytes(host.avail_bytes)
+           << "  (free+inactive-2GiB safety)";
+        lines.push_back(panel_top("pressure", width, color));
+        lines.push_back(panel_line(p1.str(), width, color));
+        lines.push_back(panel_line(p2.str(), width, color));
+        lines.push_back(panel_bottom(width, color));
+    }
 
     // ---- containers panel --------------------------------------------------
-    const int header_h = graph_h + graph_h + graph_h + 1;  // panels + status
+    const int header_h = graph_h + graph_h + graph_h + graph_h + 1;  // panels + status
     const int footer_h = 2;                                 // bottom border + col hdr
     int visible = height - header_h - footer_h;
     if (visible < 1) visible = 1;
