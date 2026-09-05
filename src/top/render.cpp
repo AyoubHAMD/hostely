@@ -39,18 +39,34 @@ constexpr const char* kMemCol = "\x1b[95m";        // bright magenta
 constexpr const char* kNetCol = "\x1b[96m";        // bright cyan
 constexpr const char* kReset  = "\x1b[0m";
 
+// Column-aware padding: pads to *display columns* (the … ellipsis and ▸
+// marker are multi-byte but single-column; byte padding shifts every column
+// after a clipped name).
+int disp_width(const std::string& s);
 std::string pad(const std::string& s, std::size_t w) {
+    int dw = disp_width(s);
     std::string out = s;
-    if (out.size() < w) out.append(w - out.size(), ' ');
+    if (static_cast<std::size_t>(dw) < w) out.append(w - static_cast<std::size_t>(dw), ' ');
     return out;
 }
 
-// Clip for display. Widths are in bytes (good enough for the ASCII-heavy
-// container names/images we render); a "…" suffix when cut.
+// Clip for display to `w` columns (bytes != columns for multi-byte glyphs);
+// a "…" suffix when cut.
 std::string clip(const std::string& s, std::size_t w) {
-    if (s.size() <= w) return s;
-    if (w <= 3) return s.substr(0, w);
-    return s.substr(0, w - 3) + kDots;
+    if (static_cast<std::size_t>(disp_width(s)) <= w) return s;
+    if (w <= 1) return s.substr(0, w);
+    // walk to w-1 display columns, then append the 1-col ellipsis
+    std::string out;
+    std::size_t cols = 0;
+    for (std::size_t i = 0; i < s.size();) {
+        if (cols + 1 > w - 1) break;
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        std::size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 4;
+        out += s.substr(i, len);
+        i += len;
+        ++cols;
+    }
+    return out + kDots;
 }
 
 // Compact byte string: 918M, 1.0G, 42K, 3B (one decimal below 100).
@@ -156,8 +172,8 @@ std::string panel_bottom(int width, bool color) {
     return s;
 }
 
-// │ text padded/truncated to width-4 │  (display columns, not bytes — the
-// braille graphs are 3 bytes per column and would otherwise be cut in half)
+// Display width of a string in terminal columns: ANSI escapes count 0,
+// multi-byte UTF-8 glyphs count 1 (all glyphs we emit are single-column).
 int disp_width(const std::string& s) {
     int w = 0;
     for (std::size_t i = 0; i < s.size();) {
