@@ -4,6 +4,7 @@
 #include "exposure/acme.hpp"
 #include "exposure/certs.hpp"
 #include "exposure/dns.hpp"
+#include "exposure/router.hpp"
 #include "exposure/expose.hpp"
 #include "log/logger.hpp"
 #include "proxy/proxy.hpp"
@@ -255,6 +256,83 @@ int run_tunnel(const cli::ParsedArgs& args) {
     }
     if (opts.local_host.empty()) opts.local_host = "127.0.0.1";
     return tunnel::tunnel_run(opts);
+}
+
+}  // namespace hostely
+// ---------------------------------------------------------------------------
+// hostely router map|unmap|status|watch
+// ---------------------------------------------------------------------------
+
+namespace hostely {
+
+int run_router(const cli::ParsedArgs& args) {
+    std::string sc = sub(args);
+    if (sc == "map") {
+        std::string ext = operand(args, 2);
+        std::string internal = operand(args, 3);
+        if (ext.empty() || internal.empty()) {
+            std::cerr << "usage: hostely router map <ext-port> <int-port> "
+                         "[--proto tcp|udp]\n";
+            return 2;
+        }
+        const char* proto = (args.has("udp")) ? "udp" : "tcp";
+        if (args.has("proto")) {
+            if (auto v = args.get("proto"); v && !v->empty()) proto = v->c_str();
+        }
+        try {
+            auto res = router_map_port(std::stoi(ext), std::stoi(internal),
+                                       proto);
+            if (!res.ok) {
+                lg::error("port map failed: " + res.error);
+                return 1;
+            }
+            lg::info("mapped :" + ext + " -> :" + internal + " (" + res.method +
+                     ")" +
+                     (res.public_ip.empty() ? "" : " public_ip=" + res.public_ip));
+            return 0;
+        } catch (...) {
+            std::cerr << "hostely router: bad port number\n";
+            return 2;
+        }
+    }
+    if (sc == "unmap") {
+        std::string ext = operand(args, 2);
+        if (ext.empty()) {
+            std::cerr << "usage: hostely router unmap <ext-port>\n";
+            return 2;
+        }
+        const char* proto = args.has("udp") ? "udp" : "tcp";
+        lg::info(router_unmap_port(std::stoi(ext), proto)
+                     ? "unmapped :" + ext
+                     : "unmap not acknowledged (may be already gone)");
+        return 0;
+    }
+    if (sc == "status") {
+        std::string ip = router_public_ip();
+        if (ip.empty()) {
+            std::cout << "public IP: unknown (NAT-PMP unavailable)\n";
+        } else {
+            std::cout << "public IP: " << ip << "\n";
+        }
+        return 0;
+    }
+    if (sc == "watch") {
+        std::string domain = operand(args, 2);
+        if (domain.empty()) {
+            std::cerr << "usage: hostely router watch <domain> [--zone Z] "
+                         "[--interval S]\n";
+            return 2;
+        }
+        std::string zone;
+        if (auto v = args.get("zone")) zone = *v;
+        int interval = 300;
+        if (auto v = args.get("interval")) {
+            try { interval = std::stoi(*v); } catch (...) {}
+        }
+        return router_watch(domain, zone, interval);
+    }
+    std::cerr << "hostely router: unknown subcommand '" << sc << "'\n";
+    return 2;
 }
 
 }  // namespace hostely

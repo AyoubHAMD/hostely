@@ -14,6 +14,12 @@
 #include "apps/app.hpp"
 #include "cli/args.hpp"
 #include "cli/exposure_cli.hpp"
+#ifdef HOSTELY_HAVE_OPENSSL
+#include "exposure/certs.hpp"
+#include "exposure/dns.hpp"
+#include "exposure/expose.hpp"
+#include "exposure/router.hpp"
+#endif
 #include "config/config.hpp"
 #include "inference/lockfile.hpp"
 #include "inference/server.hpp"
@@ -75,6 +81,7 @@ void print_help() {
         "  certs       manage TLS certs: list / issue / rm\n"
         "  expose      expose <host> <container> [--port N] | route list|rm\n"
         "  tunnel      outbound tunnel to a hostely-relay (token via env)\n"
+        "  router      router port maps + public-IP DNS watcher\n"
         "\n"
         "Global options:\n"
         "  --log-level LEVEL   debug | info | warn | error (default: info)\n"
@@ -765,9 +772,11 @@ int run_models(const hostely::cli::ParsedArgs& args) {
 // doctor
 // ----------------------------------------------------------------------------
 
-int run_doctor() {
+int run_doctor(const hostely::cli::ParsedArgs& args) {
     using namespace hostely;
     using namespace hostely::log;
+
+    const bool exposure = args.has("exposure");
 
     info("hostely doctor");
 
@@ -815,6 +824,69 @@ int run_doctor() {
         warn("Metal device        : not available");
     }
     info("Jetsam memlimit     : requires root + entitlement");
+
+#ifdef HOSTELY_HAVE_OPENSSL
+    if (exposure) {
+        using namespace hostely::exposure;
+        // headers are only pulled in for OpenSSL builds (sources are
+        // conditionally compiled in CMakeLists.txt)
+
+        std::cout << "\n--- exposure ---\n";
+
+        // exposure state dir
+        auto exp_dir = paths::state_dir() / "exposure";
+        std::cout << "exposure dir        : " << exp_dir.string() << "\n";
+
+        // DNS provider
+        if (make_dns_provider()) {
+            std::cout << "DNS provider        : cloudflare (HOSTELY_CF_API_TOKEN set)\n";
+        } else {
+            std::cout << "DNS provider        : none — set HOSTELY_CF_API_TOKEN "
+                         "to enable DNS automation\n";
+        }
+
+        // routes
+        auto routes = routes_load();
+        if (routes.empty()) {
+            std::cout << "routes              : none\n";
+        } else {
+            std::cout << "routes:\n";
+            for (const auto& r : routes) {
+                std::cout << "  " << r.host << " -> " << r.target << ":" << r.port
+                          << (r.tls ? " (tls)" : " (plain)") << "\n";
+            }
+        }
+
+        // certs
+        auto certs = cert_store_list();
+        if (certs.empty()) {
+            std::cout << "certificates        : none (run 'hostely certs issue')\n";
+        } else {
+            std::cout << "certificates:\n";
+            for (const auto& c : certs) {
+                int days = cert_days_remaining(c);
+                std::string note;
+                if (days < 0) note = "  [EXPIRED]";
+                else if (days < 30) note = "  [expires soon: " + std::to_string(days) + "d]";
+                std::cout << "  " << c.domain << " expires_in="
+                          << (days >= 0 ? std::to_string(days) + "d" : "expired")
+                          << note << "\n";
+            }
+        }
+
+        // public IP / router probe
+        std::string ip = router_public_ip();
+        if (ip.empty()) {
+            std::cout << "public IP           : unknown (NAT-PMP unavailable on "
+                         "this router)\n";
+        } else {
+            std::cout << "public IP           : " << ip << "\n";
+        }
+
+        info("doctor complete.");
+        return 0;
+    }
+#endif
 
     info("doctor complete.");
     return 0;
@@ -1008,7 +1080,7 @@ int main(int argc, const char* const argv[]) {
 
     auto cmd = args.command();
     if (cmd == "init")    return run_init();
-    if (cmd == "doctor")  return run_doctor();
+    if (cmd == "doctor")  return run_doctor(args);
     if (cmd == "run")     return run_run(cfg, args);
     if (cmd == "app")     return run_app(cfg, args);
     if (cmd == "ps")      return run_ps(cfg);
@@ -1024,6 +1096,7 @@ int main(int argc, const char* const argv[]) {
     if (cmd == "certs")  return run_certs(args);
     if (cmd == "expose") return run_expose(args);
     if (cmd == "tunnel") return run_tunnel(args);
+    if (cmd == "router") return run_router(args);
 #endif
 
     // Remaining commands get a stub for now so --help is honest about scope.

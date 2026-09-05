@@ -123,6 +123,10 @@ public:
                    const std::string& target) override {
         return upsert("CNAME", zone, name, target);
     }
+    bool set_a(const std::string& zone, const std::string& name,
+               const std::string& ip) override {
+        return upsert("A", zone, name, ip);
+    }
 
 private:
     std::vector<std::string> hdrs() const {

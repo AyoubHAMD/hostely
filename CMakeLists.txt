@@ -156,6 +156,7 @@ if(OpenSSL_FOUND)
         src/exposure/dns.cpp
         src/exposure/acme.cpp
         src/exposure/expose.cpp
+        src/exposure/router.cpp
         src/proxy/proxy.cpp
         src/tunnel/yamux.cpp
         src/tunnel/client.cpp

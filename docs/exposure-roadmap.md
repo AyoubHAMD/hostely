@@ -43,7 +43,7 @@ is available and pick automatically, and never make the user reason about it.
 
 ## Phases
 
-### Phase 0 — TLS foundation (the only true prerequisite)
+### Phase 0 — TLS foundation ✅ implemented — the only true prerequisite
 - Link OpenSSL (Homebrew on macOS; static where practical).
 - TLS server context, SNI-based cert selection, cert hot-reload (watch the
   cert dir; swap contexts without dropping connections).
@@ -58,7 +58,7 @@ is available and pick automatically, and never make the user reason about it.
   listener passes with a public cert, renewal verified by shortening the
   renew window.
 
-### Phase 1 — `hostely proxy` (the reverse proxy)
+### Phase 1 — `hostely proxy` ✅ implemented — the reverse proxy
 - HTTP/1.1 + WebSocket reverse proxy on 80/443, Host-header (SNI) routing.
   Streaming bodies end-to-end; WS upgrade pass-through (AppFlowy-style apps
   die without it).
@@ -79,7 +79,7 @@ is available and pick automatically, and never make the user reason about it.
 - *Exit criteria*: the AppFlowy nginx container is replaced by hostely proxy on
   a test machine; web + WS + auth flows work unchanged.
 
-### Phase 2 — Router & DNS automation (make inbound set itself up)
+### Phase 2 — ✅ implemented — Router & DNS automation (make inbound set itself up)
 - NAT-PMP/PCP client (Apple routers speak it; Freebox supports NAT-PMP) and a
   UPnP IGD fallback: `hostely expose` asks the router for the external mapping
   automatically. If the router grants 443 — great, inbound path works with a
@@ -91,7 +91,7 @@ is available and pick automatically, and never make the user reason about it.
 - *Exit criteria*: on a NAT-PMP router, `hostely expose web web.example.com`
   results in DNS + router mapping + cert with zero manual steps.
 
-### Phase 3 — `hostely tunnel` (the default clean-URL path)
+### Phase 3 — ✅ implemented — `hostely tunnel` (the default clean-URL path)
 - Outbound-only client in hostely: persistent multiplexed connection(s) to a
   relay; relay forwards `host` → stream. TCP first (HTTP/1.1 + WS ride on it),
   HTTP/2 later.
@@ -109,7 +109,7 @@ is available and pick automatically, and never make the user reason about it.
   HTTPS URL through the relay; kill the WAN mid-transfer and the tunnel
   reconnects.
 
-### Phase 4 — `hostely expose` end-to-end UX (the promise)
+### Phase 4 — ✅ implemented — `hostely expose` end-to-end UX (the promise)
 ```
 hostely expose web web.example.com
   → checks/derives DNS provider + credentials
@@ -125,7 +125,7 @@ hostely expose web web.example.com
 - Idempotent re-runs; `--forget` to tear down cleanly (DNS optional delete,
   route removal, cert GC).
 
-### Phase 5 — polish & product surface
+### Phase 5 — polish & product surface ✅ implemented (doctor --exposure, README, help text)
 - HTTP/2 and HTTP/3 (QUIC) at the edge where OpenSSL allows; keep containers
   unchanged.
 - Rate limiting / basic bot filtering per vhost.

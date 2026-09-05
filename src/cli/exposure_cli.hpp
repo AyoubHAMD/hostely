@@ -12,5 +12,6 @@ int run_proxy(const cli::ParsedArgs& args);
 int run_certs(const cli::ParsedArgs& args);
 int run_expose(const cli::ParsedArgs& args);
 int run_tunnel(const cli::ParsedArgs& args);
+int run_router(const cli::ParsedArgs& args);
 
 }  // namespace hostely

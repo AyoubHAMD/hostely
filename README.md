@@ -239,6 +239,15 @@ hostely models rm <name>                         remove model + sidecar
 hostely status                              CPU/RAM/Metal pressure + served model
 hostely resources <service>                 per-service rlimits + Jetsam + GPU mem
 hostely doctor                              checks: container CLI, llama.cpp, Metal
+hostely doctor --exposure                   exposure checks: DNS provider, routes, certs, public IP
+
+# exposure (requires OpenSSL at build time)
+hostely certs list | issue <domain> [san...] [--staging] | rm <domain>
+hostely proxy serve [--http 80] [--https 443]     TLS/SNI reverse proxy for routes
+hostely expose <host> <container> [--port N] [--no-tls] [--off] [--cname t]
+hostely expose route list | rm <host>
+hostely tunnel <hostname> --relay <host[:port]> [--local-port N]   token via $HOSTELY_TUNNEL_TOKEN
+hostely router map <ext> <int> [--udp] | unmap <ext> | status | watch <domain>
 ```
 
 Every command degrades gracefully if `container` is missing — it prints install
@@ -378,7 +387,7 @@ real config.
 - [x] Hugging Face model pulls with TOML sidecar registry
 - [x] Pre-load fit advisor with real tensor + KV sizes
 - [x] Session-keyed KV reuse for multi-turn chat
-- [ ] `hostely proxy` + `hostely tunnel` + `hostely expose` — native exposure of containers with real domains, auto-DNS/ACME/router (see [docs/exposure-roadmap.md](docs/exposure-roadmap.md))
+- [x] Native exposure stack — `hostely proxy` / `certs` / `expose` / `tunnel` / `router` with TLS, ACME DNS-01, DNS automation and `doctor --exposure` (see [docs/exposure-roadmap.md](docs/exposure-roadmap.md))
 - [ ] `hostely resources` — per-service accounting (needs APIs macOS 15 doesn't expose)
 - [ ] Headroom-aware scheduler ("service X wants 20 GB but only 8 GB free")
 - [ ] KV-cache quantization + speculative decoding (upstream, when stable)

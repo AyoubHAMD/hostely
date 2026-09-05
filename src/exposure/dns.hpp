@@ -31,6 +31,9 @@ public:
     // CNAME helper for `hostely expose` + tunnel custom domains.
     virtual bool set_cname(const std::string& zone, const std::string& name,
                            const std::string& target) = 0;
+    // A record (public-IP watcher).
+    virtual bool set_a(const std::string& zone, const std::string& name,
+                       const std::string& ip) = 0;
     // Best-effort provider label ("cloudflare"), for messages.
     virtual const char* name() const = 0;
 };
