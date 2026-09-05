@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <iomanip>
 #include <sstream>
 
 namespace hostely::top {
@@ -12,14 +13,31 @@ namespace hostely::top {
 namespace {
 
 // ---------------------------------------------------------------------------
-// formatting helpers
+// glyphs + formatting helpers
 // ---------------------------------------------------------------------------
 
-// UTF-8 glyphs as byte strings (char literals can't hold them).
 constexpr const char* kBarFill = "\xe2\x96\x88";   // █
 constexpr const char* kBarRest = "\xe2\x96\x91";   // ░
 constexpr const char* kMarker  = "\xe2\x96\xb8";   // ▸
 constexpr const char* kDots    = "\xe2\x80\xa6";   // …
+constexpr const char* kUp      = "\xe2\x86\x91";   // ↑
+constexpr const char* kDown    = "\xe2\x86\x93";   // ↓
+
+// box drawing (rounded)
+constexpr const char* kBTopL = "\xe2\x95\xad";     // ╭
+constexpr const char* kBTopR = "\xe2\x95\xae";     // ╮
+constexpr const char* kBBotL = "\xe2\x95\xb0";     // ╰
+constexpr const char* kBBotR = "\xe2\x95\xaf";     // ╯
+constexpr const char* kBHorz = "\xe2\x94\x80";     // ─
+constexpr const char* kBVert = "\xe2\x94\x82";     // │
+
+// theme: dim cyan frames, colored bodies (btop-ish)
+constexpr const char* kFrame  = "\x1b[2;36m";
+constexpr const char* kTitle  = "\x1b[1;36m";
+constexpr const char* kCpuCol = "\x1b[92m";        // bright green
+constexpr const char* kMemCol = "\x1b[95m";        // bright magenta
+constexpr const char* kNetCol = "\x1b[96m";        // bright cyan
+constexpr const char* kReset  = "\x1b[0m";
 
 std::string pad(const std::string& s, std::size_t w) {
     std::string out = s;
@@ -88,11 +106,190 @@ const char* heat(double pct, double yellow, double red) {
 
 std::string colorize(const std::string& text, const char* code, bool color) {
     if (!color) return text;
-    return std::string(code) + text + "\x1b[0m";
+    return std::string(code) + text + kReset;
 }
 
 std::string dim(const std::string& text, bool color) {
     return colorize(text, "\x1b[2m", color);
+}
+
+// ---------------------------------------------------------------------------
+// panels (rounded boxes with an embedded title)
+// ---------------------------------------------------------------------------
+
+// ╭─ title ────…────╮   (title may carry ANSI; width counts display cols)
+std::string panel_top(const std::string& title, int width, bool color) {
+    // display width of title (ANSI escapes are 0 cols; UTF-8 glyphs 1 col).
+    // Names we pass are ASCII, so byte length is fine after stripping escapes.
+    int tw = 0;
+    for (std::size_t i = 0; i < title.size();) {
+        if (title[i] == '\x1b') {  // skip escape sequence
+            while (i < title.size() && title[i] != 'm') ++i;
+            ++i;
+            continue;
+        }
+        // count one column per UTF-8 lead byte (all our glyphs are 1-col)
+        unsigned char c = static_cast<unsigned char>(title[i]);
+        std::size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 4;
+        i += len;
+        ++tw;
+    }
+    int inner = width - 2 - tw - 2 - 1;   // corners + " title " + right side
+    if (inner < 1) inner = 1;
+    std::string s;
+    if (color) s += kFrame;
+    s += kBTopL + std::string(kBHorz) + (color ? kReset : "") + (color ? kTitle : "")
+         + " " + title + " " + (color ? kReset : "") + (color ? kFrame : "");
+    for (int i = 0; i < inner; ++i) s += kBHorz;
+    s += kBTopR;
+    if (color) s += kReset;
+    return s;
+}
+
+std::string panel_bottom(int width, bool color) {
+    std::string s;
+    if (color) s += kFrame;
+    s += kBBotL;
+    for (int i = 0; i < width - 2; ++i) s += kBHorz;
+    s += kBBotR;
+    if (color) s += kReset;
+    return s;
+}
+
+// │ text padded/truncated to width-4 │  (display columns, not bytes — the
+// braille graphs are 3 bytes per column and would otherwise be cut in half)
+int disp_width(const std::string& s) {
+    int w = 0;
+    for (std::size_t i = 0; i < s.size();) {
+        if (s[i] == '\x1b') {  // ANSI escape: zero display width
+            while (i < s.size() && s[i] != 'm') ++i;
+            ++i;
+            continue;
+        }
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        std::size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 4;
+        i += len;
+        ++w;
+    }
+    return w;
+}
+
+std::string clip_cols(const std::string& s, int cols) {
+    if (disp_width(s) <= cols) return s;
+    std::string out;
+    int w = 0;
+    for (std::size_t i = 0; i < s.size();) {
+        unsigned char c = static_cast<unsigned char>(s[i]);
+        std::size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 4;
+        if (w + 1 > cols - 1 && cols >= 1) break;
+        out += s.substr(i, len);
+        i += len;
+        ++w;
+    }
+    return out + kDots;
+}
+
+std::string panel_line(const std::string& text, int width, bool color) {
+    int inner = std::max(width - 4, 1);
+    std::string body = clip_cols(text, inner);
+    int pad_n = inner - disp_width(body);
+    std::string s;
+    if (color) s += kFrame;
+    s += kBVert;
+    if (color) s += kReset;
+    s += " " + body;
+    if (pad_n > 0) s += std::string(static_cast<std::size_t>(pad_n), ' ');
+    if (color) s += kFrame;
+    s += kBVert;
+    if (color) s += kReset;
+    return s;
+}
+
+// ---------------------------------------------------------------------------
+// braille history graph (2 pixel-columns per cell, 4 pixel-rows per cell row)
+// ---------------------------------------------------------------------------
+
+// Braille bit for pixel row r (0 = bottom) in the left/right sub-column.
+constexpr unsigned char kDotsL[4] = {0x40, 0x04, 0x02, 0x01};  // dot7,3,2,1
+constexpr unsigned char kDotsR[4] = {0x80, 0x20, 0x10, 0x08};  // dot8,6,5,4
+
+// values in [0,1]; produces `rows` lines of `cells` braille characters
+// (one display column each, two history samples per column).
+// The newest value renders at the right edge.
+std::vector<std::string> braille_graph(const std::vector<double>& values,
+                                       int cells, int rows) {
+    std::vector<std::string> out(static_cast<std::size_t>(rows));
+    if (cells < 1 || rows < 1) return out;
+    const int px_cols = cells * 2;
+    const int px_rows = rows * 4;
+    for (int row = 0; row < rows; ++row) {
+        // output `row` covers pixel rows [ (rows-1-row)*4, +4 ) from bottom
+        int base = (rows - 1 - row) * 4;
+        std::string line;
+        for (int c = 0; c < cells; ++c) {
+            unsigned char bits = 0;
+            for (int sub = 0; sub < 2; ++sub) {
+                int idx = static_cast<int>(values.size()) - px_cols + c * 2 + sub;
+                if (idx < 0) continue;
+                double v = values[static_cast<std::size_t>(idx)];
+                if (v < 0) v = 0;
+                v = std::clamp(v, 0.0, 1.0);
+                int h = static_cast<int>(std::lround(v * px_rows));
+                if (v > 0 && h == 0) h = 1;
+                for (int r = 0; r < 4; ++r) {
+                    int prow = base + r;             // pixel row from bottom
+                    if (prow < h) bits |= (sub == 0 ? kDotsL : kDotsR)[r];
+                }
+            }
+            unsigned int cp = 0x2800u + bits;
+            std::string ch;
+            ch += static_cast<char>(0xe0 | (cp >> 12));
+            ch += static_cast<char>(0x80 | ((cp >> 6) & 0x3f));
+            ch += static_cast<char>(0x80 | (cp & 0x3f));
+            line += ch;
+        }
+        out[static_cast<std::size_t>(row)] = line;
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// history (per-sample ring buffers, advanced once per new sample)
+// ---------------------------------------------------------------------------
+
+struct GraphHistory {
+    std::vector<double> cpu, mem, rx, tx;
+    int last_sample = -1;
+
+    void push(const Snapshot& snap) {
+        if (snap.sample_count == last_sample) return;
+        last_sample = snap.sample_count;
+        double cores = snap.host.cores > 0 ? static_cast<double>(snap.host.cores) : 1.0;
+        double cpu = std::clamp(snap.host.load1 / cores, 0.0, 1.0);
+        double mem = snap.host.mem_total > 0
+            ? static_cast<double>(snap.host.mem_used) / static_cast<double>(snap.host.mem_total)
+            : 0.0;
+        double r = 0, t = 0;
+        for (const auto& row : snap.rows) {
+            if (row.net_rx_bps > 0) r += row.net_rx_bps;
+            if (row.net_tx_bps > 0) t += row.net_tx_bps;
+        }
+        auto add = [](std::vector<double>& v, double x) {
+            v.push_back(x);
+            if (v.size() > kHistCap) v.erase(v.begin());
+        };
+        add(this->cpu, cpu);
+        add(this->mem, mem);
+        add(rx, r);
+        add(tx, t);
+    }
+
+    static constexpr std::size_t kHistCap = 300;
+};
+
+GraphHistory& hist() {
+    static GraphHistory h;
+    return h;
 }
 
 }  // namespace
@@ -182,15 +379,15 @@ std::string render_row_line(const ContainerRow& r,
 
     std::ostringstream c;
     c << (selected ? "\x1b[1m" : "");
-    c << (selected ? kMarker : " ") << " \x1b[0m";
+    c << (selected ? kMarker : " ") << " " << kReset;
     c << name_col;
     // CPU
-    if (r.cpu_pct >= 0) c << heat(r.cpu_pct, 50, 80) << cpu << "\x1b[0m";
+    if (r.cpu_pct >= 0) c << heat(r.cpu_pct, 50, 80) << cpu << kReset;
     else c << dim(cpu, true);
     // MEM + gauge
     if (r.mem_pct >= 0) {
         const char* hs = heat(r.mem_pct, 60, 85);
-        c << hs << mem << "\x1b[0m" << hs << membar << "\x1b[0m";
+        c << hs << mem << kReset << hs << membar << kReset;
     } else {
         c << dim(mem, true) << dim(membar, true);
     }
@@ -217,52 +414,92 @@ std::vector<std::string> render_screen(const Snapshot& snap,
     if (selected >= static_cast<int>(rows.size())) selected = static_cast<int>(rows.size()) - 1;
     if (selected < 0) selected = 0;
 
-    const char* sort_names[] = {"CPU", "MEM", "NAME", "NET"};
-    const char* sn = sort_names[static_cast<int>(sort_key)];
+    hist().push(snap);
+    const auto& H = hist().cpu;
+    const auto& Hm = hist().mem;
+    const auto& Hrx = hist().rx;
 
-    // ---- header ------------------------------------------------------------
-    {
-        std::ostringstream h;
-        h << " hostely top   " << snap.rows.size() << " container"
-          << (snap.rows.size() == 1 ? "" : "s") << "   "
-          << (snap.sample_count > 0 ? "live" : "sampling…") << "   "
-          << colorize(std::string("[sort: ") + sn + "]", "\x1b[1m", color)
-          << "   q quit   ↑↓ select   s sort   +/- interval   k stop";
-        lines.push_back(h.str());
-    }
+    // ---- panel layout ------------------------------------------------------
+    // row 1: [ cpu | mem ]   row 2: [ net ]   row 3+: containers   last: status
+    const int graph_h = 4;        // border + 2 braille rows + border
+    int half_w = width / 2;
+    if (width < 80) half_w = width;   // stack when narrow
 
-    // host cpu line (load-1 normalized by cores, as a rough "how busy")
-    {
-        double load = snap.host.cores > 0 ? snap.host.load1 / snap.host.cores : 0;
-        double cpup = std::clamp(load, 0.0, 1.0) * 100.0;
-        std::ostringstream h;
-        std::string b = bar(cpup, color);
-        h << " cpu " << (color ? heat(cpup, 50, 80) + b + "\x1b[0m" : b) << " "
-          << fmt_pct(cpup) << "   load " << snap.host.load1 << " "
-          << snap.host.load5 << " " << snap.host.load15 << "   "
-          << snap.host.cores << " cores";
-        lines.push_back(h.str());
-    }
+    if (color) lines.push_back("\x1b[?25l");  // cursor off (harmless if repeated)
 
-    // host mem line
-    {
+    if (half_w < width) {
+        // cpu + mem panels side-by-side: build each, then merge line-by-line.
+        int rx_w = width - half_w;
+        double cores = snap.host.cores > 0 ? static_cast<double>(snap.host.cores) : 1.0;
+        double cpup = std::clamp(snap.host.load1 / cores, 0.0, 1.0) * 100.0;
         double memp = snap.host.mem_total > 0
-                          ? 100.0 * static_cast<double>(snap.host.mem_used) /
-                                static_cast<double>(snap.host.mem_total)
-                          : 0;
-        std::ostringstream h;
-        std::string b = bar(memp, color);
-        h << " mem " << (color ? heat(memp, 60, 85) + b + "\x1b[0m" : b) << " "
-          << fmt_pct(memp) << " of " << resources::human_bytes(snap.host.mem_total)
-          << "   used " << resources::human_bytes(snap.host.mem_used);
-        lines.push_back(h.str());
+            ? 100.0 * static_cast<double>(snap.host.mem_used) / static_cast<double>(snap.host.mem_total)
+            : 0.0;
+
+        std::vector<std::string> lcpu, lmem;
+        lcpu.push_back(panel_top("cpu", half_w, color));
+        for (const auto& gl : braille_graph(H, half_w - 4, 2))
+            lcpu.push_back(panel_line(colorize(gl, kCpuCol, color), half_w, color));
+        std::ostringstream t;
+        t << std::fixed << std::setprecision(2);
+        t << fmt_pct(cpup) << "  load " << snap.host.load1 << " " << snap.host.load5
+          << " " << snap.host.load15 << "  " << snap.host.cores << " cores";
+        lcpu.push_back(panel_line(t.str(), half_w, color));
+        lcpu.push_back(panel_bottom(half_w, color));
+
+        lmem.push_back(panel_top("mem", rx_w, color));
+        for (const auto& gl : braille_graph(Hm, rx_w - 4, 2))
+            lmem.push_back(panel_line(colorize(gl, kMemCol, color), rx_w, color));
+        std::ostringstream mt;
+        mt << fmt_pct(memp) << " of " << resources::human_bytes(snap.host.mem_total)
+           << "  used " << resources::human_bytes(snap.host.mem_used);
+        lmem.push_back(panel_line(mt.str(), rx_w, color));
+        lmem.push_back(panel_bottom(rx_w, color));
+
+        for (std::size_t i = 0; i < lcpu.size(); ++i) {
+            lines.push_back(lcpu[i] + (i < lmem.size() ? lmem[i] : ""));
+        }
+    } else {
+        // narrow terminal: one combined line per metric, no graphs
+        double cores = snap.host.cores > 0 ? static_cast<double>(snap.host.cores) : 1.0;
+        double cpup = std::clamp(snap.host.load1 / cores, 0.0, 1.0) * 100.0;
+        double memp = snap.host.mem_total > 0
+            ? 100.0 * static_cast<double>(snap.host.mem_used) / static_cast<double>(snap.host.mem_total)
+            : 0.0;
+        std::ostringstream t;
+        t << std::fixed << std::setprecision(2);
+        t << "cpu " << fmt_pct(cpup) << "  load " << snap.host.load1 << " "
+          << snap.host.load5 << " " << snap.host.load15 << "  "
+          << snap.host.cores << " cores";
+        lines.push_back(panel_top("host", width, color));
+        lines.push_back(panel_line(t.str(), width, color));
+        lines.push_back(panel_line(std::string("mem ") + fmt_pct(memp) + " of " +
+                                   resources::human_bytes(snap.host.mem_total),
+                                   width, color));
+        lines.push_back(panel_bottom(width, color));
     }
 
-    lines.push_back(std::string(static_cast<std::size_t>(std::min(width, 100)), '-'));
+    // ---- net panel ---------------------------------------------------------
+    double trx = 0, ttx = 0;
+    for (const auto& r : rows) {
+        if (r.net_rx_bps > 0) trx += r.net_rx_bps;
+        if (r.net_tx_bps > 0) ttx += r.net_tx_bps;
+    }
+    int net_w = width;
+    lines.push_back(panel_top("net", net_w, color));
+    {
+        auto ng = braille_graph(Hrx, net_w - 4, 2);
+        for (const auto& gl : ng)
+            lines.push_back(panel_line(colorize(gl, kNetCol, color), net_w, color));
+    }
+    std::ostringstream nt;
+    nt << "rx " << fmt_rate(trx) << "   tx " << fmt_rate(ttx);
+    lines.push_back(panel_line(nt.str(), net_w, color));
+    lines.push_back(panel_bottom(net_w, color));
 
-    // ---- rows --------------------------------------------------------------
-    const int header_h = 5;   // top line + cpu + mem + divider + col header
-    const int footer_h = 2;
+    // ---- containers panel --------------------------------------------------
+    const int header_h = graph_h + graph_h + graph_h + 1;  // panels + status
+    const int footer_h = 2;                                 // bottom border + col hdr
     int visible = height - header_h - footer_h;
     if (visible < 1) visible = 1;
 
@@ -277,9 +514,12 @@ std::vector<std::string> render_screen(const Snapshot& snap,
     ColumnSpec col;
     if (width < 100) col.name_w = 16;
 
+    lines.push_back(panel_top("containers", width, color));
+
     if (rows.empty()) {
-        lines.push_back("   no containers running — start one with `hostely run …` "
-                        "or `hostely app up`");
+        lines.push_back(panel_line("  no containers running — start one with "
+                                   "`hostely run …` or `hostely app up`",
+                                   width, color));
     } else {
         std::ostringstream hdr;
         hdr << "  " << pad("NAME", static_cast<std::size_t>(col.name_w))
@@ -287,23 +527,24 @@ std::vector<std::string> render_screen(const Snapshot& snap,
             << pad("MEM%", 7) << pad("NET RX", 9) << " " << pad("NET TX", 9)
             << "  " << pad("DISK RD", 9) << " " << pad("DISK WR", 9)
             << "  " << pad("P", 3) << "IMAGE";
-        lines.push_back(dim(hdr.str(), color));
+        lines.push_back(panel_line(dim(hdr.str(), color), width, color));
 
         int shown = 0;
         for (int i = offset; i < static_cast<int>(rows.size()) && shown < visible; ++i, ++shown) {
-            lines.push_back(render_row_line(rows[i], col,
-                                            static_cast<std::size_t>(width),
-                                            color, i == selected));
+            lines.push_back(panel_line(
+                render_row_line(rows[i], col, static_cast<std::size_t>(width),
+                                color, i == selected),
+                width, color));
         }
         if (offset + shown < static_cast<int>(rows.size())) {
-            lines.push_back(dim("   … " + std::to_string(rows.size() - offset - shown) +
-                                " more (↑↓ to scroll)", color));
+            lines.push_back(panel_line(dim("   … " + std::to_string(rows.size() - offset - shown) +
+                                           " more (" + kUp + kDown + " to scroll)", color),
+                                       width, color));
         }
     }
+    lines.push_back(panel_bottom(width, color));
 
-    lines.push_back(std::string(static_cast<std::size_t>(std::min(width, 100)), '-'));
-
-    // ---- footer ------------------------------------------------------------
+    // ---- status bar --------------------------------------------------------
     if (!confirm_kill.empty()) {
         lines.push_back(colorize(" press k again to stop '" + confirm_kill +
                                  "' — Esc to cancel", "\x1b[31m", color));
@@ -314,9 +555,15 @@ std::vector<std::string> render_screen(const Snapshot& snap,
     } else {
         std::uint64_t total_mem = 0;
         for (const auto& r : snap.rows) total_mem += r.mem_bytes;
+        const char* sort_names[] = {"CPU", "MEM", "NAME", "NET"};
         std::ostringstream f;
         f << " " << rows.size() << " containers   total mem "
-          << resources::human_bytes(total_mem) << "   sample #" << snap.sample_count;
+          << resources::human_bytes(total_mem) << "   sample #" << snap.sample_count
+          << "   ";
+        if (color) f << "\x1b[2m";
+        f << "q quit  " << kUp << kDown << " select  s sort [" << sort_names[static_cast<int>(sort_key)]
+          << "]  -/+ interval  k stop";
+        if (color) f << kReset;
         lines.push_back(f.str());
     }
 
