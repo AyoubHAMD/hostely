@@ -561,7 +561,7 @@ std::vector<std::string> render_screen(const Snapshot& snap,
         }
         std::ostringstream p2;
         p2 << "available " << resources::human_bytes(host.avail_bytes)
-           << "  (free+inactive-2GiB safety)";
+           << "  (free+inactive minus 2 GB safety)";
         lines.push_back(panel_top("pressure", width, color));
         lines.push_back(panel_line(p1.str(), width, color));
         lines.push_back(panel_line(p2.str(), width, color));
