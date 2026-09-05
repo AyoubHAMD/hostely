@@ -6,4 +6,7 @@ build/
 
 # local model weights (downloaded by `hostely models pull`, not tracked)
 models/*.gguf
-models/*.toml.cache/
+models/*.toml
+
+# editor/tool local caches
+.cache/
