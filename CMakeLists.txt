@@ -111,6 +111,17 @@ set(GGML_CPU_ALL_VARIANTS     OFF CACHE BOOL "" FORCE)   # don't compile every I
 add_subdirectory(third_party/llama.cpp ${CMAKE_BINARY_DIR}/_llama_build)
 
 # -----------------------------------------------------------------------------
+# OpenSSL 3 — TLS for the exposure stack (proxy, ACME, tunnel). Optional: the
+# container/serve features build without it; exposure commands report it.
+# -----------------------------------------------------------------------------
+find_package(OpenSSL 3 QUIET)
+if(OpenSSL_FOUND)
+    message(STATUS "OpenSSL   : ${OPENSSL_VERSION} (${OPENSSL_ROOT_DIR})")
+else()
+    message(STATUS "OpenSSL   : NOT FOUND — exposure features (proxy/certs/tunnel) disabled")
+endif()
+
+# -----------------------------------------------------------------------------
 # hostely core library
 # -----------------------------------------------------------------------------
 
@@ -118,6 +129,7 @@ add_library(hostely_core STATIC
     src/apps/app.cpp
     src/apps/compose.cpp
     src/cli/args.cpp
+    src/cli/exposure_cli.cpp
     src/config/config.cpp
     src/inference/lockfile.cpp
     src/inference/server.cpp
@@ -137,6 +149,20 @@ add_library(hostely_core STATIC
     src/top/top.cpp
     src/top/tui.cpp
 )
+
+if(OpenSSL_FOUND)
+    target_sources(hostely_core PRIVATE
+        src/exposure/certs.cpp
+        src/exposure/dns.cpp
+        src/exposure/acme.cpp
+        src/exposure/expose.cpp
+        src/proxy/proxy.cpp
+        src/tunnel/yamux.cpp
+        src/tunnel/client.cpp
+    )
+    target_compile_definitions(hostely_core PUBLIC HOSTELY_HAVE_OPENSSL=1)
+    target_link_libraries(hostely_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+endif()
 
 # The single .mm file compiles as Obj-C++; the rest of the library is C++.
 set_source_files_properties(src/resources/metal_probe.mm
@@ -183,6 +209,20 @@ target_compile_definitions(hostely
     PRIVATE
         HOSTELY_VERSION="${PROJECT_VERSION}"
 )
+
+# -----------------------------------------------------------------------------
+# hostely-relay — standalone public server for `hostely tunnel` (runs on a VPS)
+# -----------------------------------------------------------------------------
+if(OpenSSL_FOUND)
+    add_executable(hostely-relay
+        src/tunnel/relay.cpp
+        src/tunnel/yamux.cpp
+    )
+    target_compile_features(hostely-relay PRIVATE cxx_std_20)
+    target_include_directories(hostely-relay PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(hostely-relay PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    install(TARGETS hostely-relay RUNTIME DESTINATION bin)
+endif()
 
 # -----------------------------------------------------------------------------
 # Install rules (placeholder; no Homebrew formula yet)

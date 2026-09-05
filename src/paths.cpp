@@ -53,6 +53,24 @@ fs::path serve_lock_file() {
     return d / "serve.lock.json";
 }
 
+fs::path exposure_dir() {
+    auto d = state_dir();
+    if (d.empty()) return d;
+    return d / "exposure";
+}
+
+fs::path certs_dir() {
+    auto d = exposure_dir();
+    if (d.empty()) return d;
+    return d / "certs";
+}
+
+fs::path routes_file() {
+    auto d = exposure_dir();
+    if (d.empty()) return d;
+    return d / "routes.json";
+}
+
 bool ensure_state_dir() {
     std::error_code ec;
     auto d = state_dir();

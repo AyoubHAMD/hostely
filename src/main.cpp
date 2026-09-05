@@ -13,6 +13,7 @@
 
 #include "apps/app.hpp"
 #include "cli/args.hpp"
+#include "cli/exposure_cli.hpp"
 #include "config/config.hpp"
 #include "inference/lockfile.hpp"
 #include "inference/server.hpp"
@@ -68,6 +69,12 @@ void print_help() {
         "  top         live htop-style dashboard of containers + resources\n"
         "  resources   detailed per-service resource accounting\n"
         "  doctor      verify hostely can run on this machine\n"
+        "\n"
+        "Exposure (requires OpenSSL):\n"
+        "  proxy       reverse proxy for exposed containers (proxy serve)\n"
+        "  certs       manage TLS certs: list / issue / rm\n"
+        "  expose      expose <host> <container> [--port N] | route list|rm\n"
+        "  tunnel      outbound tunnel to a hostely-relay (token via env)\n"
         "\n"
         "Global options:\n"
         "  --log-level LEVEL   debug | info | warn | error (default: info)\n"
@@ -976,7 +983,7 @@ int main(int argc, const char* const argv[]) {
     Level level = Level::Info;
     if (auto v = args.get("log-level")) level = parse_level(*v);
     bool file_log = !args.has("no-log-file");
-    const bool is_top = args.command() == "top";
+    const bool is_top = args.command() == "top" || args.command() == "proxy" || args.command() == "tunnel";
 
     if (file_log) {
         if (paths::ensure_log_dir()) {
@@ -1011,6 +1018,13 @@ int main(int argc, const char* const argv[]) {
     if (cmd == "status")  return run_status();
     if (cmd == "top")     return top::run_top(cfg, args);
     if (cmd == "models")  return run_models(args);
+
+#ifdef HOSTELY_HAVE_OPENSSL
+    if (cmd == "proxy")  return run_proxy(args);
+    if (cmd == "certs")  return run_certs(args);
+    if (cmd == "expose") return run_expose(args);
+    if (cmd == "tunnel") return run_tunnel(args);
+#endif
 
     // Remaining commands get a stub for now so --help is honest about scope.
     if (cmd == "resources") {

@@ -22,6 +22,16 @@ std::filesystem::path config_file();
 /// Sidecar manifests and GGUF downloads live here (Phase 7a+).
 std::filesystem::path models_dir();
 
+/// Exposure state: certs, proxy routes, tunnel config.
+///   ~/Library/Application Support/hostely/exposure/
+std::filesystem::path exposure_dir();
+
+/// Cert store root: exposure_dir()/certs/<domain>/{cert.pem,key.pem,meta.json}
+std::filesystem::path certs_dir();
+
+/// Route/expose table: exposure_dir()/routes.json
+std::filesystem::path routes_file();
+
 /// Returns the canonical serve-state lockfile path (Phase 7c). Used by
 /// `hostely serve` to publish "what is currently loaded" to `hostely status`.
 std::filesystem::path serve_lock_file();

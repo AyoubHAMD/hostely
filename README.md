@@ -378,6 +378,7 @@ real config.
 - [x] Hugging Face model pulls with TOML sidecar registry
 - [x] Pre-load fit advisor with real tensor + KV sizes
 - [x] Session-keyed KV reuse for multi-turn chat
+- [ ] `hostely proxy` + `hostely tunnel` + `hostely expose` — native exposure of containers with real domains, auto-DNS/ACME/router (see [docs/exposure-roadmap.md](docs/exposure-roadmap.md))
 - [ ] `hostely resources` — per-service accounting (needs APIs macOS 15 doesn't expose)
 - [ ] Headroom-aware scheduler ("service X wants 20 GB but only 8 GB free")
 - [ ] KV-cache quantization + speculative decoding (upstream, when stable)
