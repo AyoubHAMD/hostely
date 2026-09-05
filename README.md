@@ -4,7 +4,7 @@
 
 # hostely
 
-**One Apple-native CLI for your Mac's whole job: run containers, serve LLMs, and know exactly what's left in unified memory.**
+**One Apple-native CLI for your Mac's whole job: run containers, serve LLMs, expose it all with real domains and TLS — and know exactly what's left in unified memory.**
 
 [![macOS](https://img.shields.io/badge/platform-macOS%2015%2B%20%F0%9F%8D%8A-000000?style=flat-square)](https://www.apple.com/macos/)
 [![Apple Silicon](https://img.shields.io/badge/arch-Apple%20Silicon%20(M1%20%7C%20M2%20%7C%20M3%20%7C%20M4)-333333?style=flat-square)](https://support.apple.com/en-us/HT211814)
@@ -18,7 +18,7 @@
 [![Sponsor](https://img.shields.io/badge/Sponsor-❤-EA4AAA?style=flat-square)](https://github.com/sponsors/AyoubHAMD)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-buy%20me%20a%20coffee-FF5E5B?style=flat-square&logo=ko-fi&logoColor=white)](https://ko-fi.com/ayohbh)
 
-*Self-host apps and services in OCI containers · Serve GGUF models at full Metal speed · See real headroom before you run out of it*
+*Self-host apps and services in OCI containers · Serve GGUF models at full Metal speed · Expose them with HTTPS, DNS and tunnels — no Docker, no ngrok · See real headroom before you run out of it*
 
 </div>
 
@@ -86,6 +86,12 @@ this machine, right now?"** — and it answers it before you OOM, not after.
 | | `hostely top` | live htop-style dashboard: per-container CPU, memory bars, network/disk rates, process counts — next to host RAM and load; `k` stops the selected container (two-press confirm), `--once` for a scriptable snapshot
 | | `hostely doctor` | checks container CLI, llama.cpp, Metal, root/entitlement, paths
 | | Serve lockfile | `serve.lock.json` with pid liveness + stale-lock detection
+**Exposure** | TLS/SNI reverse proxy for your containers | `hostely proxy serve` — routes containers by hostname, auto-reloads the route table every 3s
+| | Let's Encrypt certificates, DNS-01 | `hostely certs issue app.example.com` — hand-rolled ACME (RFC 8555), ES256 JWS, works even behind a router with no open inbound ports; wildcard-capable
+| | One-command exposure | `hostely expose app.example.com my-container` — route + optional DNS CNAME, atomically persisted
+| | Clean URLs without opening ports | `hostely tunnel <host> --relay vps.example.com` — yamux multiplexed outbound tunnel; the matching `hostely-relay` binary runs on any VPS
+| | Router + DNS automation | `hostely router map/unmap/status/watch` — PCP → NAT-PMP → UPnP port mapping ladder, plus a public-IP → DNS A record watcher
+| | Exposure health check | `hostely doctor --exposure` — DNS provider, routes, cert expiry warnings, public IP |
 
 ### What hostely is *not*
 
@@ -190,6 +196,23 @@ curl -X POST http://localhost:8081/v1/chat/completions \
 ./build/hostely app ps
 ./build/hostely app logs my-app server
 ./build/hostely app stop my-app
+
+# 9. Expose a container with a real domain + HTTPS.
+#    Two paths, both end-to-end TLS at hostely:
+#
+#    a) tunnel (default for clean URLs) — outbound only, works behind any
+#       router/NAT. Run hostely-relay on a VPS, point DNS at it.
+export HOSTELY_TUNNEL_TOKEN=<token>            # shared with the relay's env
+./build/hostely expose app.example.com web --cname relay.example.com
+./build/hostely tunnel app.example.com --relay relay.example.com:443
+
+#    b) direct — a router port forward plus hostely's proxy on 80/443.
+./build/hostely certs issue app.example.com    # ACME DNS-01: no open inbound port needed
+./build/hostely expose app.example.com web
+./build/hostely proxy serve                    # TLS/SNI reverse proxy, 80/443
+
+#    Health-check the whole exposure setup any time:
+./build/hostely doctor --exposure
 ```
 
 ### `hostely app` — compose files, no Docker
@@ -217,8 +240,8 @@ left running, changed ones are recreated. What gets translated, and why:
 - **depends_on** — respected as a start order; healthcheck *conditions* are
   ignored.
 
-Prebuilt images only for now (`build:` is rejected with a clear message —
-phase 2 will shell out to `container build`).
+Prebuilt images only for now (`build:` is rejected with a clear message;
+building images via `container build` is on the roadmap).
 
 ## CLI surface
 
@@ -309,14 +332,20 @@ hostely (single C++ binary)
 ├── Models        src/models/      registry, pull, fit advisor
 ├── Inference     src/inference/   llama.cpp server, sessions, serve lockfile
 ├── Resources     src/resources/   CPU/RAM via sysctl+mach, Metal via Obj-C++
+├── Exposure      src/exposure/    cert store, ACME, DNS providers, routes, router
+├── Proxy         src/proxy/       TLS/SNI reverse proxy (OpenSSL)
+├── Tunnel        src/tunnel/      yamux client + hostely-relay server
+├── Top           src/top/         live dashboard sampling + ANSI rendering
 └── Logging       src/log/         stderr + rotating logfile
 
 External:
-└── llama.cpp/    third_party/llama.cpp/  (git submodule, ggml-metal on)
+├── llama.cpp/    third_party/llama.cpp/  (git submodule, ggml-metal on)
+└── OpenSSL 3     exposure features build without it; everything else doesn't
 ```
 
 Zero heavyweight dependencies: HTTP is [cpp-httplib], JSON is [nlohmann/json],
-TOML is [toml++], downloads shell out to `/usr/bin/curl`, and the only
+TOML is [toml++], TLS is OpenSSL 3 (optional — builds without it, exposure
+commands report the gap), downloads shell out to `/usr/bin/curl`, and the only
 Objective-C++ translation unit is `src/resources/metal_probe.mm` (Metal has no
 C API, so a single `.mm` exports a C ABI for the rest of the codebase).
 
@@ -423,6 +452,12 @@ Fair question. Each is great at its half of the problem:
   crashing into each other.
 - **Both halves compete for the same unified memory**, and no tool reports
   them in the same units, at the same time, from the same process.
+- **ngrok / Cloudflare Tunnel** give you a public URL but rent you their
+  edge, their domains, and their rate limits — and neither runs your
+  containers or your models. hostely's tunnel pairs with your own VPS and
+  your own domain (`hostely-relay` is one binary), and its proxy terminates
+  TLS locally with Let's Encrypt certs it issues itself via DNS-01 — no
+  inbound port required, so it works behind routers that won't cooperate.
 
 hostely is one process that answers the question the others can't:
 *"what's the biggest thing I can run on this machine, right now, next to
