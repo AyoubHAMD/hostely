@@ -86,6 +86,13 @@ this machine, right now?"** — and it answers it before you OOM, not after.
 | | `hostely top` | live htop-style dashboard: per-container CPU, memory bars, network/disk rates, process counts — next to host RAM and load; `k` stops the selected container (two-press confirm), `--once` for a scriptable snapshot
 | | `hostely doctor` | checks container CLI, llama.cpp, Metal, root/entitlement, paths
 | | Serve lockfile | `serve.lock.json` with pid liveness + stale-lock detection
+
+![hostely top — live dashboard](docs/top-dashboard.png)
+
+*`hostely top` on a Mac mini running the AppFlowy and Twenty stacks next to a
+serving model: braille history graphs for cpu / mem / network, the Metal
+ceiling and what's left of unified memory, swap pressure, and the
+per-container table.*
 **Exposure** | TLS/SNI reverse proxy for your containers | `hostely proxy serve` — routes containers by hostname, auto-reloads the route table every 3s
 | | Let's Encrypt certificates, DNS-01 | `hostely certs issue app.example.com` — hand-rolled ACME (RFC 8555), ES256 JWS, works even behind a router with no open inbound ports; wildcard-capable
 | | One-command exposure | `hostely expose app.example.com my-container` — route + optional DNS CNAME, atomically persisted
