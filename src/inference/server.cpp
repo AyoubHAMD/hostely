@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -186,7 +187,10 @@ struct Server::Impl {
         return oss.str();
     }
 
-    // Run inference on a prompt, return generated text.
+    // Run inference on a prompt. Streaming variant: `hooks.on_token` fires
+    // with incremental text as it is generated (SSE for OpenAI/Anthropic
+    // clients); `hooks.on_prefill` fires once the prompt token count is
+    // known, before generation starts. Both may be null.
     //
     // `session_id` (Phase 7d): when non-empty, the request joins that
     // session's KV sequence — turn N only prefills the tokens *after* what's
@@ -200,10 +204,37 @@ struct Server::Impl {
         int completion_tokens = 0;
     };
 
-    std::string complete(const std::string& prompt, int max_tokens,
-                         const std::string& session_id = {},
-                         bool allow_session_fallback = true,
-                         CompletionStats* stats = nullptr) {
+    struct StreamHooks {
+        std::function<void(int prompt_tokens)> on_prefill;
+        std::function<void(const std::string& piece)> on_token;
+    };
+
+    // Detokenize a token sequence in one pass (exact, avoids the per-token
+    // leading-space loss of naive piece-by-piece output).
+    std::string detokenize(const std::vector<llama_token>& tokens) const {
+        if (tokens.empty()) return {};
+        std::vector<char> buf(tokens.size() * 16 + 64);
+        int n = llama_detokenize(vocab, tokens.data(),
+                                 static_cast<int32_t>(tokens.size()),
+                                 buf.data(), static_cast<int32_t>(buf.size()),
+                                 /*remove_special*/ true,
+                                 /*unparse_special*/ false);
+        if (n < 0) {
+            buf.resize(static_cast<std::size_t>(-n));
+            n = llama_detokenize(vocab, tokens.data(),
+                                 static_cast<int32_t>(tokens.size()),
+                                 buf.data(), static_cast<int32_t>(buf.size()),
+                                 true, false);
+        }
+        return n > 0 ? std::string(buf.data(), static_cast<std::size_t>(n))
+                     : std::string{};
+    }
+
+    std::string complete_stream(const std::string& prompt, int max_tokens,
+                                const std::string& session_id,
+                                bool allow_session_fallback,
+                                const StreamHooks& hooks,
+                                CompletionStats* stats = nullptr) {
         std::lock_guard<std::mutex> lock(infer_mu);
 
         llama_memory_t mem = llama_get_memory(ctx);
@@ -358,8 +389,13 @@ struct Server::Impl {
         // The session now holds exactly the prompt tokens.
         std::size_t n_total = prompt_tokens.size();
 
+        if (hooks.on_prefill) hooks.on_prefill(n_prompt);
+
         // ---- generate -------------------------------------------------------
         std::vector<llama_token> generated;   // tokens decoded into the KV
+        generated.reserve(static_cast<std::size_t>(std::max(max_tokens, 0)));
+        std::string emitted;                  // detokenized text sent so far
+        emitted.reserve(1024);
         const llama_token eos = llama_vocab_eos(vocab);
         for (int i = 0; i < max_tokens; ++i) {
             llama_token id = llama_sampler_sample(smpl, ctx, -1);
@@ -376,31 +412,34 @@ struct Server::Impl {
             }
             generated.push_back(id);
             ++n_total;
+
+            if (hooks.on_token) {
+                // Streaming detokenization: piece-by-piece is lossy on
+                // SentencePiece vocabularies (leading-space markers vanish),
+                // and it broke the KV session prefix match. So detokenize the
+                // whole sequence and emit only the confirmed tail. The
+                // quadratic re-detok is bounded by n_ctx and stays in the
+                // noise next to llama_decode (one matmul per byte vs a
+                // full layer pass per token).
+                std::string full = detokenize(generated);
+                if (full.size() > emitted.size() &&
+                    full.compare(0, emitted.size(), emitted) == 0) {
+                    hooks.on_token(full.substr(emitted.size()));
+                    emitted = std::move(full);
+                } else if (full != emitted) {
+                    // Shouldn't happen (detok is a pure prefix function
+                    // here), but never corrupt a stream: resend the tail
+                    // conservatively.
+                    hooks.on_token(full);
+                    emitted = std::move(full);
+                }
+            }
         }
         llama_batch_free(batch);
 
-        // Detokenize the WHOLE generated stream at once. Per-token
-        // detokenize is lossy on SentencePiece vocabularies (leading-space
-        // markers get dropped), which also broke the session prefix match:
-        // the client's re-tokenized reply never equalled the cached ids.
-        std::string out;
-        if (!generated.empty()) {
-            out.reserve(generated.size() * 8);
-            std::vector<char> buf(generated.size() * 8 + 64);
-            int n = llama_detokenize(vocab, generated.data(),
-                                     static_cast<int32_t>(generated.size()),
-                                     buf.data(), static_cast<int32_t>(buf.size()),
-                                     /*remove_special*/ true,
-                                     /*unparse_special*/ false);
-            if (n < 0) {
-                buf.resize(-n);
-                n = llama_detokenize(vocab, generated.data(),
-                                     static_cast<int32_t>(generated.size()),
-                                     buf.data(), static_cast<int32_t>(buf.size()),
-                                     true, false);
-            }
-            if (n > 0) out.assign(buf.data(), static_cast<size_t>(n));
-        }
+        // Detokenize the WHOLE generated stream at once for the non-stream
+        // return path (exact, no per-token loss).
+        std::string out = detokenize(generated);
 
         // Persist the session: its KV now holds prompt + generated tokens,
         // which is exactly the prefix the next turn's prompt must extend.
@@ -411,6 +450,15 @@ struct Server::Impl {
         }
         if (stats) stats->completion_tokens = static_cast<int>(generated.size());
         return out;
+    }
+
+    std::string complete(const std::string& prompt, int max_tokens,
+                         const std::string& session_id = {},
+                         bool allow_session_fallback = true,
+                         CompletionStats* stats = nullptr) {
+        StreamHooks none;
+        return complete_stream(prompt, max_tokens, session_id,
+                               allow_session_fallback, none, stats);
     }
 
     // ---- HTTP handlers ----------------------------------------------------
@@ -481,6 +529,171 @@ struct Server::Impl {
         res.set_content(resp.dump(), "application/json");
     }
 
+    // ---- shared HTTP helpers ----------------------------------------------
+
+    std::string api_error(const std::string& type, const std::string& message) const {
+        return json{{"type", "error"},
+                    {"error", {{"type", type}, {"message", message}}}}.dump();
+    }
+
+    // Flatten one Anthropic message: content is either a string or an array
+    // of blocks ({type:"text",text:...}). Tool blocks are ignored for now
+    // (Phase C); their text is skipped rather than sent to the model.
+    std::string flatten_anthropic_content(const json& content) {
+        if (content.is_string()) return content.get<std::string>();
+        if (!content.is_array()) return {};
+        std::string out;
+        for (const auto& block : content) {
+            if (!block.is_object()) continue;
+            if (block.value("type", "") == "text") {
+                if (!out.empty()) out += "\n";
+                out += block.value("text", "");
+            }
+        }
+        return out;
+    }
+
+    // Anthropic /v1/messages — the protocol Claude Code and the Claude SDKs
+    // speak. System prompt arrives top-level; any model string is accepted
+    // and resolved to whatever is loaded (Ollama-style aliasing).
+    void handle_messages(const httplib::Request& req, httplib::Response& res) {
+        json body;
+        try { body = json::parse(req.body); }
+        catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(api_error("invalid_request_error", e.what()),
+                            "application/json");
+            return;
+        }
+
+        if (!body.contains("messages") || !body["messages"].is_array()) {
+            res.status = 400;
+            res.set_content(api_error("invalid_request_error",
+                                      "messages array is required"),
+                            "application/json");
+            return;
+        }
+
+        // Map Anthropic messages -> the internal chat format. The system
+        // prompt (string or blocks) becomes a leading "system" message; the
+        // model's chat template then renders it natively.
+        json msgs = json::array();
+        if (body.contains("system")) {
+            std::string sys = flatten_anthropic_content(body["system"]);
+            if (!sys.empty()) {
+                msgs.push_back({{"role", "system"}, {"content", sys}});
+            }
+        }
+        for (const auto& m : body["messages"]) {
+            std::string role = m.value("role", "user");
+            if (role != "assistant") role = "user";   // tools/etc -> user side
+            msgs.push_back({{"role", role},
+                            {"content", flatten_anthropic_content(m.value("content", json{}))}});
+        }
+
+        std::string model_name = opts.model_path.stem().string();
+        const int max_tokens = body.value("max_tokens", 256);
+        const bool want_stream = body.value("stream", false);
+        const std::string session_id = req.get_header_value("X-Session-Id");
+
+        auto id = std::string("msg_") +
+                  std::to_string(std::chrono::system_clock::now()
+                                     .time_since_epoch().count());
+
+        if (!want_stream) {
+            std::string prompt = build_prompt_from_messages(msgs, model_name);
+            CompletionStats stats;
+            std::string text = complete(prompt, max_tokens, session_id,
+                                        /*allow_session_fallback*/ true, &stats);
+            if (text.empty() && stats.prompt_tokens > 0) {
+                res.status = 503;
+                res.set_content(api_error("overloaded_error",
+                        "inference failed; the KV pool may be exhausted"),
+                        "application/json");
+                return;
+            }
+            json resp = {
+                {"id",            id},
+                {"type",          "message"},
+                {"role",          "assistant"},
+                {"model",         model_name},
+                {"content",       json::array({
+                                      {{"type", "text"}, {"text", text}},
+                                  })},
+                {"stop_reason",   "end_turn"},
+                {"stop_sequence", nullptr},
+                {"usage",         {{"input_tokens", stats.prompt_tokens},
+                                   {"output_tokens", stats.completion_tokens}}},
+            };
+            res.set_content(resp.dump(), "application/json");
+            return;
+        }
+
+        // ---- SSE stream (Anthropic event protocol) ------------------------
+        // message_start is emitted from the prefill hook, so it carries the
+        // real input-token count. The inference mutex is held for the whole
+        // stream: one request at a time by design for v1 — a slow client
+        // throttles the queue, not memory (each pending request holds only
+        // its JSON body).
+        std::string prompt = build_prompt_from_messages(msgs, model_name);
+        res.set_chunked_content_provider(
+            "text/event-stream",
+            [this, prompt = std::move(prompt), max_tokens, session_id, model_name,
+             id](std::size_t, httplib::DataSink& sink) -> bool {
+                auto send = [&](const std::string& event, const json& data) {
+                    std::string chunk = "event: " + event + "\ndata: " +
+                                        data.dump() + "\n\n";
+                    return sink.write(chunk.data(), chunk.size());
+                };
+                auto message_start = [&](int input_tokens) {
+                    send("message_start", {
+                        {"type", "message_start"},
+                        {"message", {
+                            {"id", id}, {"type", "message"},
+                            {"role", "assistant"}, {"model", model_name},
+                            {"content", json::array()},
+                            {"stop_reason", nullptr},
+                            {"usage", {{"input_tokens", input_tokens},
+                                       {"output_tokens", 0}}},
+                        }}});
+                    send("content_block_start",
+                         {{"type", "content_block_start"}, {"index", 0},
+                          {"content_block", {{"type", "text"}, {"text", ""}}}});
+                };
+
+                CompletionStats stats;
+                StreamHooks hooks;
+                bool started = false;
+                hooks.on_prefill = [&](int n_prompt) {
+                    message_start(n_prompt);
+                    started = true;
+                };
+                hooks.on_token = [&](const std::string& piece) {
+                    if (piece.empty()) return;
+                    if (!started) { message_start(0); started = true; }
+                    (void)send("content_block_delta", {
+                        {"type", "content_block_delta"},
+                        {"index", 0},
+                        {"delta", {{"type", "text_delta"}, {"text", piece}}},
+                    });
+                };
+                complete_stream(prompt, max_tokens, session_id,
+                                /*allow_session_fallback*/ true, hooks, &stats);
+                if (!started) message_start(stats.prompt_tokens);
+
+                send("content_block_stop",
+                     {{"type", "content_block_stop"}, {"index", 0}});
+                send("message_delta", {
+                    {"type", "message_delta"},
+                    {"delta", {{"stop_reason", "end_turn"},
+                               {"stop_sequence", nullptr}}},
+                    {"usage", {{"output_tokens", stats.completion_tokens}}}});
+                send("message_stop", {{"type", "message_stop"}});
+                sink.done();
+                return true;
+            });
+    }
+
     void handle_chat_completions(const httplib::Request& req, httplib::Response& res) {
         json body;
         try { body = json::parse(req.body); }
@@ -504,6 +717,59 @@ struct Server::Impl {
         // conversation. Without it, complete() tries prefix-matching against
         // existing sessions and otherwise runs stateless.
         std::string session_id = req.get_header_value("X-Session-Id");
+
+        // Streaming: same chunk protocol as OpenAI (chat.completion.chunk
+        // deltas, finish_reason chunk, then `data: [DONE]`).
+        if (body.value("stream", false)) {
+            res.set_chunked_content_provider(
+                "text/event-stream",
+                [this, prompt = std::move(prompt), max_tokens, session_id,
+                 model_name = opts.model_path.stem().string()](
+                    std::size_t, httplib::DataSink& sink) -> bool {
+                    auto send = [&](const json& obj) {
+                        std::string chunk = "data: " + obj.dump() + "\n\n";
+                        return sink.write(chunk.data(), chunk.size());
+                    };
+                    auto chunk_obj = [&](const json& delta, const char* finish) {
+                        // NB: a null const char* would route into nlohmann's
+                        // string ctor (strlen crash) — box it explicitly.
+                        json finish_reason = finish ? json(finish) : json(nullptr);
+                        return json{
+                            {"id",      "chatcmpl-" + std::to_string(
+                                          std::chrono::system_clock::now()
+                                              .time_since_epoch().count())},
+                            {"object",  "chat.completion.chunk"},
+                            {"created", std::time(nullptr)},
+                            {"model",   model_name},
+                            {"choices", json::array({{
+                                {"index", 0},
+                                {"delta", delta},
+                                {"finish_reason", finish_reason},
+                            }})}};
+                    };
+
+                    send(chunk_obj(json{{"role", "assistant"}}, nullptr));
+                    CompletionStats stats;
+                    StreamHooks hooks;
+                    hooks.on_token = [&](const std::string& piece) {
+                        if (!piece.empty())
+                            send(chunk_obj(json{{"content", piece}}, nullptr));
+                    };
+                    complete_stream(prompt, max_tokens, session_id,
+                                    /*allow_session_fallback*/ true, hooks, &stats);
+
+                    json final_chunk = chunk_obj(json::object(), "stop");
+                    final_chunk["usage"] = {
+                        {"prompt_tokens", stats.prompt_tokens},
+                        {"completion_tokens", stats.completion_tokens},
+                        {"total_tokens", stats.prompt_tokens + stats.completion_tokens}};
+                    send(final_chunk);
+                    sink.write("data: [DONE]\n\n", 14);
+                    sink.done();
+                    return true;
+                });
+            return;
+        }
 
         CompletionStats stats;
         std::string text = complete(prompt, max_tokens, session_id,
@@ -539,6 +805,7 @@ struct Server::Impl {
         svr.Get ("/v1/models",            [this](auto& r, auto& s){ handle_models(r, s); });
         svr.Post("/v1/completions",       [this](auto& r, auto& s){ handle_completions(r, s); });
         svr.Post("/v1/chat/completions",  [this](auto& r, auto& s){ handle_chat_completions(r, s); });
+        svr.Post("/v1/messages",          [this](auto& r, auto& s){ handle_messages(r, s); });
         svr.Get ("/health",               [](auto&, auto& s){
             s.set_content(R"({"status":"ok"})", "application/json");
         });
@@ -620,7 +887,8 @@ int Server::start() {
     info("endpoints:");
     info("  GET  /v1/models");
     info("  POST /v1/completions");
-    info("  POST /v1/chat/completions");
+    info("  POST /v1/chat/completions  (OpenAI-compatible, stream supported)");
+    info("  POST /v1/messages           (Anthropic-compatible, stream supported)");
     info("  GET  /health");
 
     bool ok = impl_->svr.listen("0.0.0.0", options_.port);

@@ -78,7 +78,7 @@ this machine, right now?"** — and it answers it before you OOM, not after.
 **Models** | `hostely models pull` from Hugging Face | resumable curl downloads, quant selectors (`repo:Q4_K_M`), TOML sidecar manifests
 | | Local model registry | `models list / path / rm` with logical names + unique-prefix matching
 | | Pre-load **fit advisor** | real tensor + KV-cache sizes vs live free+inactive headroom; refuses configs that won't fit (`--no-fit-check` overrides)
-**Inference** | OpenAI-compatible HTTP API | `/v1/models`, `/v1/completions`, `/v1/chat/completions`, `/health`
+**Inference** | OpenAI + Anthropic-compatible HTTP API, streaming | `/v1/models`, `/v1/completions`, `/v1/chat/completions`, `/v1/messages`, `/health`
 | | Full Metal offload | upstream `ggml-metal`, zero forks, zero custom kernels
 | | **Session KV reuse** | `X-Session-Id` keeps one KV sequence per conversation — turn 2+ prefills only the new tokens (~10× faster than re-reading history)
 | | LRU session table | 32 concurrent sessions in one shared `n_ctx` KV pool (`kv_unified`)
@@ -188,6 +188,14 @@ curl -X POST http://localhost:8081/v1/chat/completions \
                       {"role":"assistant","content":"Nice to meet you!"},
                       {"role":"user","content":"What is my name?"}]}'
 # → "Your name is Alice."   (answered from cached KV, not a re-prefill)
+
+# 5b. Point coding agents at it — hostely speaks both protocols, streaming
+#     included. Any model string is accepted and resolved to what's loaded.
+ANTHROPIC_BASE_URL=http://localhost:8081 claude       # Claude Code → /v1/messages
+OPENAI_BASE_URL=http://localhost:8081/v1 codex        # Codex → /v1/chat/completions
+# Streaming: add "stream": true. Anthropic clients get the full SSE event
+# protocol (message_start → content_block_delta → message_stop) with real
+# token usage; OpenAI clients get chat.completion.chunk deltas + [DONE].
 
 # 6. While it serves, status shows the loaded model + live headroom.
 ./build/hostely status
@@ -328,6 +336,29 @@ the new tokens:
 Sessions are in-process only (lost on restart, by design) and LRU-evicted when
 the table fills. Requests without a session id stay fully stateless and
 OpenAI-compatible.
+
+### Two protocols, one server
+
+`hostely serve` speaks both wire formats, so coding agents work out of the box
+with a local model — no gateway, no translation layer:
+
+| | OpenAI | Anthropic |
+|---|---|---|
+| endpoint | `POST /v1/chat/completions` | `POST /v1/messages` |
+| system prompt | `messages[0].role == "system"` | top-level `system` field |
+| streaming | `chat.completion.chunk` deltas + `data: [DONE]` | `message_start` → `content_block_delta` → `message_stop` |
+| usage | in the final chunk / response body | `message_delta` / response body |
+| session header | `X-Session-Id` | `X-Session-Id` |
+
+Any `model` string a client sends is accepted and resolved to the loaded model
+(Ollama-style aliasing), so tools like **Claude Code** (`ANTHROPIC_BASE_URL`)
+and **Codex** (`OPENAI_BASE_URL`) can point straight at `hostely serve`.
+Streaming detokenization emits only confirmed text: each token re-detokenizes
+the whole generated sequence and the stable tail is flushed, so SentencePiece
+leading-space pieces never split mid-token.
+
+Tool calling is not implemented yet — agent clients that require tool-use
+round-trips will fall back or error; plain chat and code completion work.
 
 ## Architecture
 
