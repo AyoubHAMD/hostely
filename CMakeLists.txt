@@ -98,7 +98,7 @@ set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_APP      OFF CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_COMMON   OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)   # chat templates + tool-call parsing
 set(LLAMA_OPENSSL        OFF CACHE BOOL "" FORCE)
 set(LLAMA_CURL           OFF CACHE BOOL "" FORCE)
 
@@ -185,6 +185,7 @@ target_link_libraries(hostely_core
         httplib::httplib          # cpp-httplib, only inference uses it
         nlohmann_json::nlohmann_json
         llama                     # llama.cpp
+        llama-common              # llama.cpp chat templates / tool-call PEG parser
         ggml                      # ggml (transitive via llama but be explicit)
         ggml::ggml                # alias
 )

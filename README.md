@@ -78,7 +78,7 @@ this machine, right now?"** — and it answers it before you OOM, not after.
 **Models** | `hostely models pull` from Hugging Face | resumable curl downloads, quant selectors (`repo:Q4_K_M`), TOML sidecar manifests
 | | Local model registry | `models list / path / rm` with logical names + unique-prefix matching
 | | Pre-load **fit advisor** | real tensor + KV-cache sizes vs live free+inactive headroom; refuses configs that won't fit (`--no-fit-check` overrides)
-**Inference** | OpenAI + Anthropic-compatible HTTP API, streaming | `/v1/models`, `/v1/completions`, `/v1/chat/completions`, `/v1/messages`, `/health`
+**Inference** | OpenAI + Anthropic-compatible HTTP API, streaming, tool calling | `/v1/models`, `/v1/completions`, `/v1/chat/completions`, `/v1/messages`, `/health`
 | | Full Metal offload | upstream `ggml-metal`, zero forks, zero custom kernels
 | | **Session KV reuse** | `X-Session-Id` keeps one KV sequence per conversation — turn 2+ prefills only the new tokens (~10× faster than re-reading history)
 | | LRU session table | 32 concurrent sessions in one shared `n_ctx` KV pool (`kv_unified`)
@@ -270,6 +270,7 @@ hostely stop <name>
 hostely logs <name> [--follow]
 hostely serve <name|model.gguf> [--port N] [--ctx-size N] [--gpu-layers N]
                                             [--threads N] [--no-fit-check]
+                                            [--chat-template T]
 hostely models pull <hf-repo>[:quant] | <url>   download a GGUF + TOML sidecar
 hostely models list                              local model registry
 hostely models path <name>                      print resolved path (scripting)
@@ -357,8 +358,26 @@ Streaming detokenization emits only confirmed text: each token re-detokenizes
 the whole generated sequence and the stable tail is flushed, so SentencePiece
 leading-space pieces never split mid-token.
 
-Tool calling is not implemented yet — agent clients that require tool-use
-round-trips will fall back or error; plain chat and code completion work.
+### Tool calling
+
+Both protocols round-trip tool calls, rendered by the model's own jinja chat
+template and parsed back by llama.cpp's PEG parser (the same machinery
+`llama-server` uses — no hand-rolled per-model formats):
+
+- **OpenAI**: pass `tools` (+ `tool_calls` / `role:"tool"` messages);
+  responses carry `message.tool_calls[].function.arguments` and
+  `finish_reason:"tool_calls"`.
+- **Anthropic**: pass `tools` (`input_schema`); assistant turns emit
+  `tool_use` blocks with parsed `input`, tool results come back as
+  `tool_result` blocks, and `stop_reason` is `"tool_use"`.
+- Streaming: text deltas stream live; when a tool call starts forming,
+  it is emitted as complete `tool_use` / `tool_calls` blocks (clients
+  assemble on block boundaries anyway — no torn JSON).
+- Model support matters: the model must know its tool format (Qwen2.5-,
+  Llama-3.1-class and up behave; very small models emit malformed calls,
+  which are surfaced as plain text rather than invented tool calls).
+- `--chat-template <jinja>` overrides the GGUF's template — for models whose
+  metadata ships a template without tool tags.
 
 ## Architecture
 

@@ -429,7 +429,9 @@ int run_serve(const hostely::config::Config& cfg,
             "  --gpu-layers N     layers to offload to Metal (-1 = all)\n"
             "  --threads N        CPU threads (0 = auto)\n"
             "  --engine NAME      llama (only one supported on this build)\n"
-            "  --no-fit-check     skip the Phase 7b pre-load memory check\n";
+            "  --no-fit-check     skip the Phase 7b pre-load memory check\n"
+            "  --chat-template T  jinja chat template override (e.g. for tool\n"
+            "                     support on models with bare GGUF metadata)\n";
         return 2;
     }
 
@@ -466,6 +468,7 @@ int run_serve(const hostely::config::Config& cfg,
     inference::ServeOptions opts;
     opts.model_path = resolved_path;
     if (args.has("no-fit-check")) opts.no_fit_check = true;
+    if (auto v = args.get("chat-template")) opts.chat_template = *v;
 
     // --engine: we only support "llama" (ggml-metal on Apple Silicon).
     // If the user passes --engine mlx we surface a clear message rather

@@ -14,6 +14,9 @@ struct ServeOptions {
     int                   gpu_layers = -1;   // -1 = all
     int                   threads  = 0;     //  0 = auto
     bool                  no_fit_check = false; // bypass Phase 7b advisor
+    // Jinja chat-template override (tool support for models whose GGUF
+    // metadata ships a template without tool tags). Empty = use GGUF value.
+    std::string           chat_template;
 };
 
 /// Snapshot of a successfully-loaded model — populated right after

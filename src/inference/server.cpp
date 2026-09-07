@@ -11,6 +11,7 @@
 // CMake target's INTERFACE_INCLUDE_DIRECTORIES, so this single include is
 // enough for the C API.
 #include <llama.h>
+#include <chat.h>   // llama.cpp common: jinja chat templates + tool-call PEG parser
 
 // cpp-httplib + nlohmann/json (single-header libs).
 #include <httplib.h>
@@ -42,6 +43,10 @@ struct Server::Impl {
     llama_context* ctx    = nullptr;
     const llama_vocab* vocab = nullptr;
     llama_sampler* smpl   = nullptr;
+
+    // Jinja chat templates + tool-call PEG parser (llama.cpp common). Built
+    // from the GGUF metadata; falls back to chatml for template-less models.
+    common_chat_templates_ptr tmpls_;
 
     // HTTP.
     httplib::Server svr;
@@ -103,6 +108,13 @@ struct Server::Impl {
 
         // Greedy sampler for v1 — simple, deterministic, fast.
         smpl = llama_sampler_init_greedy();
+
+        // Jinja chat templates from GGUF metadata (chatml fallback). This is
+        // what lets /v1/messages and /v1/chat/completions render tool
+        // definitions and tool calls the way the model was trained to see
+        // them — the manual llama_chat_apply_template path has no notion of
+        // tools.
+        tmpls_ = common_chat_templates_init(model, opts.chat_template);
 
         // Phase 7d: size the session machinery from the real context.
         const std::size_t n_seq = llama_n_seq_max(ctx);
@@ -187,6 +199,176 @@ struct Server::Impl {
         return oss.str();
     }
 
+    // ---- tool-calling (llama.cpp common) -----------------------------------
+    // Both wire protocols are converted into llama.cpp's chat model, rendered
+    // with the model's own jinja template (which knows how to present tool
+    // definitions + tool calls), and the generated text is parsed back with
+    // the PEG parser selected by that template. This is the same machinery
+    // llama-server uses — reimplementing per-model formats here would be a
+    // correctness trap.
+
+    // OpenAI:  tools: [{type:"function", function:{name, description,
+    //                   parameters}}]
+    // Anthropic: tools: [{name, description, input_schema}]
+    std::vector<common_chat_tool> to_common_tools(const json& tools, bool anthropic) {
+        std::vector<common_chat_tool> out;
+        out.reserve(tools.size());
+        for (const auto& t : tools) {
+            if (!t.is_object()) continue;
+            common_chat_tool ct;
+            if (anthropic) {
+                ct.name        = t.value("name", "");
+                ct.description = t.value("description", "");
+                if (t.contains("input_schema"))
+                    ct.parameters = t["input_schema"].dump();
+            } else {
+                const json& fn = t.contains("function") ? t["function"] : t;
+                ct.name        = fn.value("name", "");
+                ct.description = fn.value("description", "");
+                if (fn.contains("parameters"))
+                    ct.parameters = fn["parameters"].dump();
+            }
+            if (!ct.name.empty()) out.push_back(std::move(ct));
+        }
+        return out;
+    }
+
+    // Read a message content field that may be a string, null (assistant
+    // tool_call turns), or absent — nlohmann's value() throws on null.
+    static std::string content_str(const json& m) {
+        return m.contains("content") && m["content"].is_string()
+            ? m["content"].get<std::string>() : std::string{};
+    }
+
+    // OpenAI messages -> common model. "tool" results and assistant
+    // tool_calls map onto the corresponding common fields so the template can
+    // render a full agent transcript.
+    std::vector<common_chat_msg> openai_to_common(const json& messages) {
+        std::vector<common_chat_msg> out;
+        out.reserve(messages.size());
+        for (const auto& m : messages) {
+            common_chat_msg c;
+            c.role = m.value("role", "user");
+            if (c.role == "tool") {
+                c.tool_call_id = m.value("tool_call_id", "");
+                c.tool_name    = m.value("name", "");
+            }
+            c.content = content_str(m);
+            if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+                for (const auto& tc : m["tool_calls"]) {
+                    const json& fn = tc.value("function", json::object());
+                    common_chat_tool_call call;
+                    call.id        = tc.value("id", "");
+                    call.name      = fn.value("name", "");
+                    call.arguments = fn.value("arguments", "");
+                    c.tool_calls.push_back(std::move(call));
+                }
+            }
+            out.push_back(std::move(c));
+        }
+        return out;
+    }
+
+    // Anthropic messages (+ optional top-level system) -> common model.
+    // tool_use blocks become assistant tool_calls; tool_result blocks become
+    // tool messages keyed by tool_use_id.
+    std::vector<common_chat_msg> anthropic_to_common(const json& messages,
+                                                     const std::string& system) {
+        std::vector<common_chat_msg> out;
+        out.reserve(messages.size() + 1);
+        if (!system.empty()) {
+            common_chat_msg sys;
+            sys.role    = "system";
+            sys.content = system;
+            out.push_back(std::move(sys));
+        }
+        for (const auto& m : messages) {
+            const bool assistant = m.value("role", "user") == "assistant";
+            common_chat_msg c;
+            c.role    = assistant ? "assistant" : "user";
+            c.content = flatten_anthropic_content(m.value("content", json{}));
+            if (m.value("content", json{}).is_array()) {
+                for (const auto& block : m["content"]) {
+                    if (!block.is_object()) continue;
+                    const std::string type = block.value("type", "");
+                    if (assistant && type == "tool_use") {
+                        common_chat_tool_call call;
+                        call.id        = block.value("id", "");
+                        call.name      = block.value("name", "");
+                        if (block.contains("input"))
+                            call.arguments = block["input"].dump();
+                        c.tool_calls.push_back(std::move(call));
+                    } else if (!assistant && type == "tool_result") {
+                        common_chat_msg tr;
+                        tr.role         = "tool";
+                        tr.tool_call_id = block.value("tool_use_id", "");
+                        // tool_result content is a string or content blocks.
+                        if (block.contains("content")) {
+                            if (block["content"].is_string())
+                                tr.content = block["content"].get<std::string>();
+                            else
+                                tr.content = flatten_anthropic_content(block["content"]);
+                        }
+                        out.push_back(std::move(tr));
+                    }
+                }
+            }
+            // Skip pure tool_result user messages — already emitted above.
+            if (!c.content.empty() || !c.tool_calls.empty())
+                out.push_back(std::move(c));
+        }
+        return out;
+    }
+
+    // Render the conversation (optionally with tools) through the model's
+    // own jinja template. Returns the prompt + the PEG parser spec that
+    // understands how this template expresses tool calls.
+    common_chat_params apply_chat_template(const std::vector<common_chat_msg>& msgs,
+                                           const std::vector<common_chat_tool>* tools) {
+        common_chat_templates_inputs in;
+        in.messages = msgs;
+        in.use_jinja = true;
+        if (tools && !tools->empty()) {
+            in.tools = *tools;
+            in.tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;
+        }
+        return common_chat_templates_apply(tmpls_.get(), in);
+    }
+
+    // Parse generated text into content + tool calls.
+    common_chat_msg parse_generation(const std::string& text,
+                                     const common_chat_params& chat_params,
+                                     bool partial) {
+        common_chat_parser_params pp(chat_params);
+        // The ctor from chat_params only copies format + generation_prompt;
+        // without the arena the parser degrades to "pure content", which
+        // makes the rendered generation prompt leak into the content.
+        pp.parser.load(chat_params.parser);
+        return common_chat_parse(text, partial, pp);
+    }
+
+    // Stop sequences suggested by the template (e.g. the tool-call end tag).
+    // Applied after generation so a chatty model that emits them literally
+    // doesn't leak template artifacts into the content.
+    std::string apply_stops(std::string text, const common_chat_params& chat_params) {
+        for (const auto& stop : chat_params.additional_stops) {
+            if (stop.empty()) continue;
+            const auto pos = text.find(stop);
+            if (pos != std::string::npos) text.resize(pos);
+        }
+        return text;
+    }
+
+    // Stable ids for wire responses: OpenAI wants "call_...", Anthropic
+    // "toolu_...". The parser leaves ids empty for most formats.
+    static std::string gen_id(const char* prefix) {
+        static std::atomic<uint64_t> counter{0};
+        return std::string(prefix) +
+               std::to_string(std::chrono::system_clock::now()
+                                  .time_since_epoch().count()) +
+               "-" + std::to_string(counter.fetch_add(1));
+    }
+
     // Run inference on a prompt. Streaming variant: `hooks.on_token` fires
     // with incremental text as it is generated (SSE for OpenAI/Anthropic
     // clients); `hooks.on_prefill` fires once the prompt token count is
@@ -234,25 +416,29 @@ struct Server::Impl {
                                 const std::string& session_id,
                                 bool allow_session_fallback,
                                 const StreamHooks& hooks,
-                                CompletionStats* stats = nullptr) {
+                                CompletionStats* stats = nullptr,
+                                const std::vector<std::string>* stops = nullptr) {
         std::lock_guard<std::mutex> lock(infer_mu);
 
         llama_memory_t mem = llama_get_memory(ctx);
 
         // Tokenize the full prompt (session path relies on the tokenizer
         // being deterministic so the prefix property holds turn-to-turn).
+        // parse_special=true: jinja chat templates emit real special tokens
+        // (<|im_start|>, <|tool_call|>, ...); tokenizing them as plain text
+        // makes tool-capable models echo the tags instead of acting on them.
         const int prompt_cap = static_cast<int>(prompt.size()) + 16;
         std::vector<llama_token> prompt_tokens(prompt_cap);
         int n_prompt = llama_tokenize(
             vocab, prompt.data(), static_cast<int32_t>(prompt.size()),
             prompt_tokens.data(), static_cast<int32_t>(prompt_tokens.size()),
-            /*add_special*/ true, /*parse_special*/ false);
+            /*add_special*/ true, /*parse_special*/ true);
         if (n_prompt < 0) {
             prompt_tokens.resize(-n_prompt);
             n_prompt = llama_tokenize(
                 vocab, prompt.data(), static_cast<int32_t>(prompt.size()),
                 prompt_tokens.data(), static_cast<int32_t>(prompt_tokens.size()),
-                true, false);
+                true, true);
         }
         if (n_prompt <= 0) return {};
         prompt_tokens.resize(n_prompt);
@@ -413,15 +599,36 @@ struct Server::Impl {
             generated.push_back(id);
             ++n_total;
 
+            // Streaming detokenization: piece-by-piece is lossy on
+            // SentencePiece vocabularies (leading-space markers vanish),
+            // and it broke the KV session prefix match. So detokenize the
+            // whole sequence and emit only the confirmed tail. The
+            // quadratic re-detok is bounded by n_ctx and stays in the
+            // noise next to llama_decode (one matmul per byte vs a
+            // full layer pass per token). Also computed when stop
+            // sequences are set — they are text-level, not token-level.
+            const bool want_full = hooks.on_token || stops;
+            std::string full;
+            if (want_full) {
+                full = detokenize(generated);
+                // Template stop sequences (tool-call end tags): stop as soon
+                // as one appears; the tail is trimmed by apply_stops().
+                if (stops) {
+                    bool hit = false;
+                    for (const auto& s : *stops) {
+                        if (!s.empty() && full.find(s) != std::string::npos) {
+                            hit = true;
+                            break;
+                        }
+                    }
+                    if (hit) {
+                        llama_memory_t m2 = llama_get_memory(ctx);
+                        if (m2) llama_memory_seq_rm(m2, seq, n_total, -1);
+                        break;
+                    }
+                }
+            }
             if (hooks.on_token) {
-                // Streaming detokenization: piece-by-piece is lossy on
-                // SentencePiece vocabularies (leading-space markers vanish),
-                // and it broke the KV session prefix match. So detokenize the
-                // whole sequence and emit only the confirmed tail. The
-                // quadratic re-detok is bounded by n_ctx and stays in the
-                // noise next to llama_decode (one matmul per byte vs a
-                // full layer pass per token).
-                std::string full = detokenize(generated);
                 if (full.size() > emitted.size() &&
                     full.compare(0, emitted.size(), emitted) == 0) {
                     hooks.on_token(full.substr(emitted.size()));
@@ -555,7 +762,10 @@ struct Server::Impl {
 
     // Anthropic /v1/messages — the protocol Claude Code and the Claude SDKs
     // speak. System prompt arrives top-level; any model string is accepted
-    // and resolved to whatever is loaded (Ollama-style aliasing).
+    // and resolved to whatever is loaded (Ollama-style aliasing). Tool
+    // definitions are rendered through the model's jinja template and
+    // tool_use / tool_result blocks round-trip through llama.cpp's chat
+    // model, so agentic clients drive the local model end to end.
     void handle_messages(const httplib::Request& req, httplib::Response& res) {
         json body;
         try { body = json::parse(req.body); }
@@ -574,53 +784,88 @@ struct Server::Impl {
             return;
         }
 
-        // Map Anthropic messages -> the internal chat format. The system
-        // prompt (string or blocks) becomes a leading "system" message; the
-        // model's chat template then renders it natively.
-        json msgs = json::array();
-        if (body.contains("system")) {
-            std::string sys = flatten_anthropic_content(body["system"]);
-            if (!sys.empty()) {
-                msgs.push_back({{"role", "system"}, {"content", sys}});
-            }
-        }
-        for (const auto& m : body["messages"]) {
-            std::string role = m.value("role", "user");
-            if (role != "assistant") role = "user";   // tools/etc -> user side
-            msgs.push_back({{"role", role},
-                            {"content", flatten_anthropic_content(m.value("content", json{}))}});
+        const std::string system = body.contains("system")
+            ? flatten_anthropic_content(body["system"]) : std::string{};
+        std::vector<common_chat_tool> tools;
+        if (body.contains("tools") && body["tools"].is_array())
+            tools = to_common_tools(body["tools"], /*anthropic*/ true);
+
+        common_chat_params chat_params;
+        try {
+            chat_params = apply_chat_template(
+                anthropic_to_common(body["messages"], system),
+                tools.empty() ? nullptr : &tools);
+        } catch (const std::exception& e) {
+            res.status = 500;
+            res.set_content(api_error("api_error",
+                    std::string("chat template failed: ") + e.what()),
+                    "application/json");
+            return;
         }
 
         std::string model_name = opts.model_path.stem().string();
         const int max_tokens = body.value("max_tokens", 256);
         const bool want_stream = body.value("stream", false);
         const std::string session_id = req.get_header_value("X-Session-Id");
-
-        auto id = std::string("msg_") +
+        const auto id = std::string("msg_") +
                   std::to_string(std::chrono::system_clock::now()
                                      .time_since_epoch().count());
 
+        // Build the wire content-block array from a parsed generation.
+        auto make_blocks = [&](const common_chat_msg& parsed,
+                               const char** stop_reason) -> json {
+            json blocks = json::array();
+            if (!parsed.content.empty())
+                blocks.push_back({{"type", "text"}, {"text", parsed.content}});
+            for (const auto& tc : parsed.tool_calls) {
+                json input = json::object();
+                try { input = json::parse(tc.arguments); }
+                catch (const std::exception&) {
+                    input = json::object();   // malformed args -> empty input
+                }
+                blocks.push_back({{"type", "tool_use"},
+                                  {"id", tc.id.empty() ? gen_id("toolu_") : tc.id},
+                                  {"name", tc.name},
+                                  {"input", input}});
+            }
+            *stop_reason = parsed.tool_calls.empty() ? "end_turn" : "tool_use";
+            if (blocks.empty())
+                blocks.push_back({{"type", "text"}, {"text", ""}});
+            return blocks;
+        };
+
         if (!want_stream) {
-            std::string prompt = build_prompt_from_messages(msgs, model_name);
             CompletionStats stats;
-            std::string text = complete(prompt, max_tokens, session_id,
-                                        /*allow_session_fallback*/ true, &stats);
-            if (text.empty() && stats.prompt_tokens > 0) {
+            std::string text = complete_stream(chat_params.prompt, max_tokens,
+                                               session_id,
+                                               /*allow_session_fallback*/ true,
+                                               {}, &stats,
+                                               &chat_params.additional_stops);
+            if (text.empty() && stats.prompt_tokens > 0 &&
+                stats.completion_tokens == 0) {
                 res.status = 503;
                 res.set_content(api_error("overloaded_error",
                         "inference failed; the KV pool may be exhausted"),
                         "application/json");
                 return;
             }
+            text = apply_stops(std::move(text), chat_params);
+            common_chat_msg parsed;
+            if (chat_params.format != COMMON_CHAT_FORMAT_CONTENT_ONLY ||
+                !chat_params.additional_stops.empty()) {
+                try { parsed = parse_generation(text, chat_params, false); }
+                catch (const std::exception&) { parsed.content = text; }
+            } else {
+                parsed.content = text;
+            }
+            const char* stop_reason = "end_turn";
             json resp = {
                 {"id",            id},
                 {"type",          "message"},
                 {"role",          "assistant"},
                 {"model",         model_name},
-                {"content",       json::array({
-                                      {{"type", "text"}, {"text", text}},
-                                  })},
-                {"stop_reason",   "end_turn"},
+                {"content",       make_blocks(parsed, &stop_reason)},
+                {"stop_reason",   stop_reason},
                 {"stop_sequence", nullptr},
                 {"usage",         {{"input_tokens", stats.prompt_tokens},
                                    {"output_tokens", stats.completion_tokens}}},
@@ -634,16 +879,45 @@ struct Server::Impl {
         // real input-token count. The inference mutex is held for the whole
         // stream: one request at a time by design for v1 — a slow client
         // throttles the queue, not memory (each pending request holds only
-        // its JSON body).
-        std::string prompt = build_prompt_from_messages(msgs, model_name);
+        // its JSON body). With tools, blocks are opened/closed dynamically:
+        // text deltas extend a text block; parsed tool calls appear as
+        // tool_use blocks fed by input_json_delta fragments.
         res.set_chunked_content_provider(
             "text/event-stream",
-            [this, prompt = std::move(prompt), max_tokens, session_id, model_name,
-             id](std::size_t, httplib::DataSink& sink) -> bool {
+            [this, chat_params = std::move(chat_params), max_tokens, session_id,
+             model_name, id](std::size_t, httplib::DataSink& sink) -> bool {
                 auto send = [&](const std::string& event, const json& data) {
                     std::string chunk = "event: " + event + "\ndata: " +
                                         data.dump() + "\n\n";
                     return sink.write(chunk.data(), chunk.size());
+                };
+
+                const bool with_tools = chat_params.format !=
+                                            COMMON_CHAT_FORMAT_CONTENT_ONLY ||
+                                        !chat_params.additional_stops.empty();
+
+                CompletionStats stats;
+                StreamHooks hooks;
+
+                int next_block = -1;
+                bool block_open = false;
+
+                auto open_block = [&](const char* type) {
+                    ++next_block;
+                    block_open = true;
+                    json block = {{"type", type}};
+                    if (std::string(type) == "tool_use")
+                        block["input"] = json::object();
+                    send("content_block_start",
+                         {{"type", "content_block_start"},
+                          {"index", next_block},
+                          {"content_block", block}});
+                };
+                auto close_block = [&]() {
+                    if (!block_open) return;
+                    send("content_block_stop",
+                         {{"type", "content_block_stop"}, {"index", next_block}});
+                    block_open = false;
                 };
                 auto message_start = [&](int input_tokens) {
                     send("message_start", {
@@ -656,36 +930,122 @@ struct Server::Impl {
                             {"usage", {{"input_tokens", input_tokens},
                                        {"output_tokens", 0}}},
                         }}});
-                    send("content_block_start",
-                         {{"type", "content_block_start"}, {"index", 0},
-                          {"content_block", {{"type", "text"}, {"text", ""}}}});
+                };
+                auto ensure_started = [&](int input_tokens) {
+                    if (next_block >= 0 || block_open) return;
+                    message_start(input_tokens);
+                    if (!with_tools) open_block("text");
                 };
 
-                CompletionStats stats;
-                StreamHooks hooks;
-                bool started = false;
-                hooks.on_prefill = [&](int n_prompt) {
-                    message_start(n_prompt);
-                    started = true;
-                };
+                // Text streams live. The moment the partial parser sees a
+                // tool call forming, streaming stops and everything after is
+                // buffered — tool_use blocks are emitted atomically from the
+                // final parse below. Splitting a tool call's JSON across
+                // incremental fragments gains nothing (clients parse the
+                // block on content_block_stop) and risks torn output when
+                // the partial parser revises the call mid-stream.
+                bool buffering = false;
+                std::string acc;
+                hooks.on_prefill = [&](int n_prompt) { ensure_started(n_prompt); };
                 hooks.on_token = [&](const std::string& piece) {
                     if (piece.empty()) return;
-                    if (!started) { message_start(0); started = true; }
-                    (void)send("content_block_delta", {
-                        {"type", "content_block_delta"},
-                        {"index", 0},
-                        {"delta", {{"type", "text_delta"}, {"text", piece}}},
-                    });
+                    if (!with_tools) {
+                        ensure_started(0);
+                        send("content_block_delta", {
+                            {"type", "content_block_delta"},
+                            {"index", next_block},
+                            {"delta", {{"type", "text_delta"}, {"text", piece}}}});
+                        return;
+                    }
+                    if (buffering) { acc += piece; return; }
+                    acc += piece;
+                    ensure_started(0);
+                    try {
+                        auto parsed = parse_generation(acc, chat_params, true);
+                        if (!parsed.tool_calls.empty()) {
+                            buffering = true;   // stop streaming text
+                            return;
+                        }
+                        if (!parsed.content.empty() && !block_open) {
+                            open_block("text");
+                        }
+                        if (block_open) {
+                            send("content_block_delta", {
+                                {"type", "content_block_delta"},
+                                {"index", next_block},
+                                {"delta", {{"type", "text_delta"},
+                                           {"text", parsed.content}}}});
+                            acc.clear();   // this content is confirmed
+                        }
+                    } catch (const std::exception&) {
+                        // Parser hiccup mid-stream: emit raw text, never hang.
+                        if (!block_open) open_block("text");
+                        send("content_block_delta", {
+                            {"type", "content_block_delta"},
+                            {"index", next_block},
+                            {"delta", {{"type", "text_delta"}, {"text", piece}}}});
+                        acc.clear();
+                    }
                 };
-                complete_stream(prompt, max_tokens, session_id,
-                                /*allow_session_fallback*/ true, hooks, &stats);
-                if (!started) message_start(stats.prompt_tokens);
 
-                send("content_block_stop",
-                     {{"type", "content_block_stop"}, {"index", 0}});
+                std::string text = complete_stream(chat_params.prompt, max_tokens,
+                                                   session_id,
+                                                   /*allow_session_fallback*/ true,
+                                                   hooks, &stats,
+                                                   &chat_params.additional_stops);
+                if (next_block < 0 && !block_open) message_start(stats.prompt_tokens);
+                close_block();
+
+                // Final, authoritative parse: emit text (if it wasn't fully
+                // streamed) and any tool_use blocks as complete blocks.
+                text = apply_stops(std::move(text), chat_params);
+                common_chat_msg parsed;
+                if (with_tools) {
+                    try { parsed = parse_generation(text, chat_params, false); }
+                    catch (const std::exception&) { parsed.content = text; }
+                } else {
+                    parsed.content = text;
+                }
+                const char* stop_reason = "end_turn";
+                if (!with_tools) {
+                    if (!parsed.content.empty()) {
+                        open_block("text");
+                        send("content_block_delta", {
+                            {"type", "content_block_delta"},
+                            {"index", next_block},
+                            {"delta", {{"type", "text_delta"},
+                                       {"text", parsed.content}}}});
+                        close_block();
+                    }
+                } else {
+                    // text that was still buffered when tool calls started
+                    if (!parsed.content.empty()) {
+                        open_block("text");
+                        send("content_block_delta", {
+                            {"type", "content_block_delta"},
+                            {"index", next_block},
+                            {"delta", {{"type", "text_delta"},
+                                       {"text", parsed.content}}}});
+                        close_block();
+                    }
+                    for (const auto& tc : parsed.tool_calls) {
+                        json input = json::object();
+                        try { input = json::parse(tc.arguments); }
+                        catch (const std::exception&) {}
+                        open_block("tool_use");
+                        send("content_block_delta", {
+                            {"type", "content_block_delta"},
+                            {"index", next_block},
+                            {"delta", {{"type", "input_json_delta"},
+                                       {"partial_json", input.dump()}}}});
+                        close_block();
+                    }
+                    if (!parsed.tool_calls.empty()) stop_reason = "tool_use";
+                }
+
                 send("message_delta", {
                     {"type", "message_delta"},
-                    {"delta", {{"stop_reason", "end_turn"},
+                    {"delta", {{"stop_reason", stop_reason},
                                {"stop_sequence", nullptr}}},
                     {"usage", {{"output_tokens", stats.completion_tokens}}}});
                 send("message_stop", {{"type", "message_stop"}});
@@ -694,6 +1054,9 @@ struct Server::Impl {
             });
     }
 
+    // OpenAI /v1/chat/completions — with tool calling. The conversation is
+    // rendered through the model's jinja template (tools included) and the
+    // generated text is PEG-parsed back into content + tool_calls.
     void handle_chat_completions(const httplib::Request& req, httplib::Response& res) {
         json body;
         try { body = json::parse(req.body); }
@@ -709,22 +1072,48 @@ struct Server::Impl {
             return;
         }
 
-        std::string model_name;
-        std::string prompt = build_prompt_from_messages(body["messages"], model_name);
         int max_tokens = body.value("max_tokens", 256);
-
         // Phase 7d: a client-managed session id keeps one KV sequence per
         // conversation. Without it, complete() tries prefix-matching against
         // existing sessions and otherwise runs stateless.
         std::string session_id = req.get_header_value("X-Session-Id");
 
+        std::vector<common_chat_tool> tools;
+        if (body.contains("tools") && body["tools"].is_array())
+            tools = to_common_tools(body["tools"], /*anthropic*/ false);
+
+        common_chat_params chat_params;
+        try {
+            chat_params = apply_chat_template(openai_to_common(body["messages"]),
+                                              tools.empty() ? nullptr : &tools);
+        } catch (const std::exception& e) {
+            // A template that can't render the conversation must not take
+            // the whole server down.
+            res.status = 500;
+            res.set_content(json{{"error",
+                std::string("chat template failed: ") + e.what()}}.dump(),
+                "application/json");
+            return;
+        }
+        std::string prompt = std::move(chat_params.prompt);
+        if (std::getenv("HOSTELY_DEBUG_PROMPT")) {
+            log::info("prompt >>> " + prompt.substr(0, 2000));
+            log::info("format=" +
+                      std::string(common_chat_format_name(chat_params.format)));
+        }
+
+        const bool want_stream = body.value("stream", false);
+        const std::string model_name = opts.model_path.stem().string();
+
         // Streaming: same chunk protocol as OpenAI (chat.completion.chunk
-        // deltas, finish_reason chunk, then `data: [DONE]`).
-        if (body.value("stream", false)) {
+        // deltas, finish_reason chunk, then `data: [DONE]`). With tools, the
+        // accumulated text is partially PEG-parsed per token and diffed, so
+        // content and tool_calls stream incrementally.
+        if (want_stream) {
             res.set_chunked_content_provider(
                 "text/event-stream",
                 [this, prompt = std::move(prompt), max_tokens, session_id,
-                 model_name = opts.model_path.stem().string()](
+                 model_name, chat_params = std::move(chat_params)](
                     std::size_t, httplib::DataSink& sink) -> bool {
                     auto send = [&](const json& obj) {
                         std::string chunk = "data: " + obj.dump() + "\n\n";
@@ -748,17 +1137,74 @@ struct Server::Impl {
                             }})}};
                     };
 
+                    const bool with_tools = !chat_params.additional_stops.empty() ||
+                                            chat_params.format !=
+                                                COMMON_CHAT_FORMAT_CONTENT_ONLY;
                     send(chunk_obj(json{{"role", "assistant"}}, nullptr));
+
+                    std::string acc;
+                    common_chat_msg prev;
                     CompletionStats stats;
                     StreamHooks hooks;
                     hooks.on_token = [&](const std::string& piece) {
-                        if (!piece.empty())
+                        if (piece.empty()) return;
+                        acc += piece;
+                        if (!with_tools) {
                             send(chunk_obj(json{{"content", piece}}, nullptr));
+                            return;
+                        }
+                        // Partial parse + diff -> incremental deltas.
+                        try {
+                            auto parsed = parse_generation(acc, chat_params, /*partial*/ true);
+                            for (const auto& d : common_chat_msg_diff::compute_diffs(prev, parsed)) {
+                                if (!d.content_delta.empty())
+                                    send(chunk_obj(json{{"content", d.content_delta}}, nullptr));
+                                if (d.tool_call_index != std::string::npos) {
+                                    json tc = {{"index", d.tool_call_index}};
+                                    if (!d.tool_call_delta.name.empty() ||
+                                        !d.tool_call_delta.id.empty()) {
+                                        tc["id"] = d.tool_call_delta.id.empty()
+                                            ? gen_id("call_") : d.tool_call_delta.id;
+                                        tc["type"] = "function";
+                                        tc["function"] = {
+                                            {"name", d.tool_call_delta.name},
+                                            {"arguments", d.tool_call_delta.arguments}};
+                                    } else {
+                                        tc["function"] = {
+                                            {"arguments", d.tool_call_delta.arguments}};
+                                    }
+                                    send(chunk_obj(json{{"tool_calls", json::array({tc})}},
+                                                   nullptr));
+                                }
+                            }
+                            prev = std::move(parsed);
+                        } catch (const std::exception&) {
+                            // Parser hiccup mid-stream: fall back to raw text.
+                            send(chunk_obj(json{{"content", piece}}, nullptr));
+                        }
                     };
-                    complete_stream(prompt, max_tokens, session_id,
-                                    /*allow_session_fallback*/ true, hooks, &stats);
+                    std::string text = complete_stream(prompt, max_tokens, session_id,
+                                                       /*allow_session_fallback*/ true,
+                                                       hooks, &stats,
+                                                       &chat_params.additional_stops);
+                    if (text.empty() && stats.completion_tokens == 0 && acc.empty())
+                        text = acc;
 
-                    json final_chunk = chunk_obj(json::object(), "stop");
+                    const char* finish = "stop";
+                    common_chat_msg parsed;
+                    if (with_tools) {
+                        try {
+                            parsed = parse_generation(apply_stops(acc, chat_params),
+                                                      chat_params, /*partial*/ false);
+                            if (!parsed.tool_calls.empty()) finish = "tool_calls";
+                        } catch (const std::exception&) {
+                            parsed.content = acc;
+                        }
+                    } else {
+                        parsed.content = acc;
+                    }
+
+                    json final_chunk = chunk_obj(json::object(), finish);
                     final_chunk["usage"] = {
                         {"prompt_tokens", stats.prompt_tokens},
                         {"completion_tokens", stats.completion_tokens},
@@ -772,15 +1218,54 @@ struct Server::Impl {
         }
 
         CompletionStats stats;
-        std::string text = complete(prompt, max_tokens, session_id,
-                                    /*allow_session_fallback*/ true, &stats);
-        if (text.empty() && stats.prompt_tokens > 0) {
+        std::string text = complete_stream(prompt, max_tokens, session_id,
+                                           /*allow_session_fallback*/ true,
+                                           {}, &stats, &chat_params.additional_stops);
+        if (text.empty() && stats.prompt_tokens > 0 && stats.completion_tokens == 0) {
             res.status = 503;
             res.set_content(json{{"error",
                 "inference failed; the KV pool may be exhausted — restart "
                 "the server or retry with a shorter prompt"}}.dump(),
                 "application/json");
             return;
+        }
+
+        text = apply_stops(std::move(text), chat_params);
+        if (std::getenv("HOSTELY_DEBUG_PROMPT")) {
+            log::info("raw gen >>> " + text.substr(0, 500));
+        }
+        common_chat_msg parsed;
+        bool has_tools = false;
+        if (chat_params.format != COMMON_CHAT_FORMAT_CONTENT_ONLY ||
+            !chat_params.additional_stops.empty()) {
+            try {
+                parsed = parse_generation(text, chat_params, /*partial*/ false);
+                has_tools = !parsed.tool_calls.empty();
+            } catch (const std::exception&) {
+                parsed.content = text;
+            }
+        } else {
+            parsed.content = text;
+        }
+
+        json message = {{"role", "assistant"}};
+        if (has_tools) {
+            if (!parsed.content.empty()) message["content"] = parsed.content;
+            else message["content"] = nullptr;
+            json tcs = json::array();
+            for (std::size_t i = 0; i < parsed.tool_calls.size(); ++i) {
+                const auto& tc = parsed.tool_calls[i];
+                tcs.push_back({
+                    {"id",        tc.id.empty() ? gen_id("call_") : tc.id},
+                    {"type",      "function"},
+                    {"index",     i},
+                    {"function",  {{"name", tc.name},
+                                   {"arguments", tc.arguments}}},
+                });
+            }
+            message["tool_calls"] = tcs;
+        } else {
+            message["content"] = parsed.content;
         }
 
         json resp = {
@@ -791,8 +1276,8 @@ struct Server::Impl {
             {"model",    opts.model_path.stem().string()},
             {"choices",  json::array({{
                 {"index",         0},
-                {"message",       {{"role", "assistant"}, {"content", text}}},
-                {"finish_reason", "stop"},
+                {"message",       message},
+                {"finish_reason", has_tools ? "tool_calls" : "stop"},
             }})},
             {"usage", {{"prompt_tokens", stats.prompt_tokens},
                        {"completion_tokens", stats.completion_tokens},
